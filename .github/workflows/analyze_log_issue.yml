@@ -24,6 +24,8 @@ jobs:
           gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}" --jq .body > issue_body.md
 
           python3 - << 'EOF'
+          import html
+          import json
           import os
           import re
           import subprocess
@@ -50,10 +52,65 @@ jobs:
 
           ATTACHMENT_URL_PATTERNS = [
               r"https://github\.com/user-attachments/assets/[a-f0-9\-]+",
+              r"https://github\.com/user-attachments/files/\d+/[^\s\)\>]+",
               r"https://github\.com/[^/\s\)\>]+/[^/\s\)\>]+/files/\d+/[^\s\)\>]+",
               r"https://github\.com/[^\s\)\>]+/user-attachments/files/\d+/[^\s\)\>]+",
               r"https://(?:private-)?user-images\.githubusercontent\.com/[^\s\)\>]+",
           ]
+
+          def get_issue_body_html() -> str:
+              result = subprocess.run(
+                  [
+                      "gh", "api", f"repos/{repository}/issues/{issue_number}",
+                      "-H", "Accept: application/vnd.github.html+json",
+                  ],
+                  capture_output=True,
+                  text=True,
+                  check=True,
+              )
+              return json.loads(result.stdout).get("body_html", "")
+
+          def resolve_download_urls(markdown_url: str, body_html: str) -> list[str]:
+              urls: list[str] = []
+              seen: set[str] = set()
+
+              def add(url: str | None) -> None:
+                  if not url:
+                      return
+                  normalized = html.unescape(url.strip())
+                  if normalized and normalized not in seen:
+                      seen.add(normalized)
+                      urls.append(normalized)
+
+              add(markdown_url)
+
+              file_match = re.search(r"/files/(\d+)/([^?\s\"]+)", markdown_url)
+              if file_match:
+                  file_id = file_match.group(1)
+                  filename = html.unescape(file_match.group(2))
+                  for pattern in (
+                      rf'href="([^"]+/files/{file_id}/{re.escape(filename)}[^"]*)"',
+                      rf'href="([^"]+/files/{file_id}/[^"]+)"',
+                  ):
+                      match = re.search(pattern, body_html)
+                      if match:
+                          add(match.group(1))
+
+              asset_match = re.search(r"/assets/([a-f0-9\-]+)", markdown_url)
+              if asset_match:
+                  asset_id = asset_match.group(1)
+                  match = re.search(rf'href="([^"]+/assets/{asset_id}[^"]*)"', body_html)
+                  if match:
+                      add(match.group(1))
+
+              if file_match:
+                  file_id = file_match.group(1)
+                  for match in re.finditer(r'href="([^"]+)"', body_html):
+                      href = html.unescape(match.group(1))
+                      if f"/files/{file_id}/" in href:
+                          add(href)
+
+              return urls
 
           def find_attachment_url(text: str) -> str | None:
               for pattern in ATTACHMENT_URL_PATTERNS:
@@ -90,18 +147,27 @@ jobs:
               req = urllib.request.Request(url)
               if gh_token:
                   req.add_header("Authorization", f"Bearer {gh_token}")
+              req.add_header("Accept", "application/octet-stream")
+              req.add_header("User-Agent", "GitHub-Actions-Log-Analyzer")
               try:
                   with opener.open(req) as resp:
                       return resp.read().decode("utf-8", errors="replace"), None
               except Exception as e:
                   return "", str(e)
 
+          body_html = get_issue_body_html()
+          candidate_urls = resolve_download_urls(download_url, body_html)
+
           raw_log = ""
           download_error = None
           for attempt, delay in enumerate([0, 10, 20, 30]):
               if delay:
                   time.sleep(delay)
-              raw_log, download_error = download_log(download_url)
+              for candidate_url in candidate_urls:
+                  raw_log, download_error = download_log(candidate_url)
+                  if raw_log:
+                      download_url = candidate_url
+                      break
               if raw_log:
                   break
 
