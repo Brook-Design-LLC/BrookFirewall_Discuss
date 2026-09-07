@@ -9,7 +9,8 @@ permissions:
 
 jobs:
   analyze-and-format:
-    if: contains(github.event.issue.labels.*.name, 'manual-log-upload')
+    # Check issue body directly to avoid the race condition where labels are empty on 'opened'
+    if: contains(github.event.issue.body, '### Log File Attachment')
     runs-on: ubuntu-latest
     steps:
       - name: Download Log File and Format Issue
@@ -36,10 +37,9 @@ jobs:
           desc = extract_field("Description", issue_body)
           log_field = extract_field("Log File Attachment", issue_body)
 
-          # Extract attachment URL (supports standard GitHub asset and user-attachments formats)
+          # Extract file attachment URL
           url_match = re.search(r'https?://[^\s\)\>]+(?:github\.com/[^\s\)\>]+/(?:files|user-attachments/files)/[^\s\)\>]+)', log_field)
           if not url_match:
-              # Fallback: check whole issue body for uploaded file URLs
               url_match = re.search(r'https?://[^\s\)\>]+(?:github\.com/[^\s\)\>]+/(?:files|user-attachments/files)/[^\s\)\>]+)', issue_body)
 
           if not url_match:
@@ -51,7 +51,7 @@ jobs:
 
           download_url = url_match.group(0)
 
-          # Strip Authorization header when redirecting off github.com (e.g. AWS S3 storage)
+          # Strip Authorization header when redirecting off github.com (e.g., AWS S3 pre-signed URLs)
           class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, req, fp, code, msg, headers, newurl):
                   new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -112,7 +112,6 @@ jobs:
           if last_closing_idx == -1:
               vpn_status = "Connected" if any("Logger started" in l or "PacketTunnelTun up" in l for l in lines) else "Unknown"
           else:
-              # Check if any traffic continues after the last closing event
               has_traffic_after = any(
                   any(indicator in l for indicator in traffic_indicators)
                   for l in lines[last_closing_idx + 1:]
@@ -290,7 +289,7 @@ jobs:
           | --- | --- |
           {c_rows}"""
 
-          # 10. Format Final Issue Body
+          # 10. Format Output
           formatted_body = f"""## Info
 
           | Field | Value |
@@ -325,10 +324,10 @@ jobs:
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
               f.write(cleaned_body)
 
+          # Update the issue body and attach the status label
           subprocess.run([
               "gh", "issue", "edit", issue_number,
               "--body-file", "issue_formatted.md",
-              "--remove-label", "manual-log-upload",
               "--add-label", "log-analyzed"
           ], check=True)
           EOF
