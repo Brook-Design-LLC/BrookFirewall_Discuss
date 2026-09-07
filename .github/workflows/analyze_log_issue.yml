@@ -12,7 +12,7 @@ jobs:
     if: contains(github.event.issue.labels.*.name, 'manual-log-upload')
     runs-on: ubuntu-latest
     steps:
-      - name: Parse Log and Format Issue
+      - name: Download Log File and Format Issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
@@ -22,9 +22,11 @@ jobs:
           import os
           import re
           import subprocess
+          import urllib.request
 
           issue_body = os.environ.get("ISSUE_BODY", "")
           issue_number = os.environ.get("ISSUE_NUMBER", "")
+          gh_token = os.environ.get("GH_TOKEN", "")
 
           def extract_field(label: str, text: str) -> str:
               pattern = rf"###\s+{re.escape(label)}\s*\n\n(.*?)(?=\n###|\Z)"
@@ -32,19 +34,48 @@ jobs:
               return match.group(1).strip() if match else ""
 
           desc = extract_field("Description", issue_body)
-          vpn_status = extract_field("VPN Status", issue_body) or "unknown"
-          raw_log = extract_field("Log Content", issue_body)
+          log_field = extract_field("Log File Attachment", issue_body)
 
-          # Strip markdown code formatting
-          raw_log = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", raw_log)
-          raw_log = re.sub(r"\n```$", "", raw_log).strip()
+          # Extract attachment URL (supports standard GitHub asset and user-attachments formats)
+          url_match = re.search(r'https?://[^\s\)\>]+(?:github\.com/[^\s\)\>]+/(?:files|user-attachments/files)/[^\s\)\>]+)', log_field)
+          if not url_match:
+              # Fallback: check whole issue body for uploaded file URLs
+              url_match = re.search(r'https?://[^\s\)\>]+(?:github\.com/[^\s\)\>]+/(?:files|user-attachments/files)/[^\s\)\>]+)', issue_body)
+
+          if not url_match:
+              error_body = f"{desc}\n\n> [!WARNING]\n> **No log file attachment detected.** Please edit this issue and attach a valid `.txt` or `.log` file."
+              with open("issue_formatted.md", "w", encoding="utf-8") as f:
+                  f.write(error_body)
+              subprocess.run(["gh", "issue", "edit", issue_number, "--body-file", "issue_formatted.md"], check=True)
+              exit(0)
+
+          download_url = url_match.group(0)
+
+          # Strip Authorization header when redirecting off github.com (e.g. AWS S3 storage)
+          class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+                  if "github.com" not in newurl.lower() and "Authorization" in new_req.headers:
+                      del new_req.headers["Authorization"]
+                  return new_req
+
+          opener = urllib.request.build_opener(SafeRedirectHandler())
+          req = urllib.request.Request(download_url)
+          if gh_token:
+              req.add_header("Authorization", f"Bearer {gh_token}")
+
+          try:
+              with opener.open(req) as resp:
+                  raw_log = resp.read().decode("utf-8", errors="replace")
+          except Exception as e:
+              raw_log = ""
 
           lines = raw_log.splitlines()
 
           def md_cell(val: str) -> str:
               return val.replace("\n", " ").replace("|", "\\|").strip()
 
-          # 1. Info Header Extraction (Fallback to unknown)
+          # 1. Info Header Extraction
           info_dict = {
               "OS": "unknown",
               "Device": "unknown",
@@ -62,7 +93,33 @@ jobs:
               elif line.startswith("App Version:"):
                   info_dict["App Ver"] = line.split(":", 1)[1].strip() or "unknown"
 
-          # 2. Brook Mode Method
+          # 2. Automated VPN Status Detection
+          traffic_indicators = (
+              "proxy/tun: processing",
+              "taking detour",
+              "tunneling request",
+              "dialing TCP",
+              "proxy: Xtls",
+              "Logger started",
+              "core: Xray"
+          )
+
+          last_closing_idx = -1
+          for idx, line in enumerate(lines):
+              if "app/log: Logger closing" in line:
+                  last_closing_idx = idx
+
+          if last_closing_idx == -1:
+              vpn_status = "Connected" if any("Logger started" in l or "PacketTunnelTun up" in l for l in lines) else "Unknown"
+          else:
+              # Check if any traffic continues after the last closing event
+              has_traffic_after = any(
+                  any(indicator in l for indicator in traffic_indicators)
+                  for l in lines[last_closing_idx + 1:]
+              )
+              vpn_status = "Connected" if has_traffic_after else "Disconnected"
+
+          # 3. Brook Mode Method
           brook_method = "Inactive / Unknown"
           if "Success, coordinates patched" in raw_log:
               brook_method = "Override (Coordinates Patched)"
@@ -71,7 +128,7 @@ jobs:
           elif re.search(r"taking detour \[block\] for \[tcp:gs-loc", raw_log):
               brook_method = "Traditional (Detour Block)"
 
-          # 3. Network OK (Exclude gs-loc and ls.apple, verify DNS answer + active traffic)
+          # 4. Network Reachability Check
           dns_answered_domains = set()
           for line in lines:
               if "app/dns:" in line or "proxy/dns:" in line:
@@ -108,11 +165,11 @@ jobs:
           else:
               network_ok_text = "No (no external domain confirmed)"
 
-          # 4. UTUN Interface Status
+          # 5. UTUN Interface Status
           utun_errors = raw_log.count("falied to set interface") + raw_log.count("failed to set interface")
           utun_text = "OK" if utun_errors == 0 else f"{utun_errors} interface errors"
 
-          # 5. Outbound Routing
+          # 6. Outbound Routing
           detour_counts = {}
           direct_count = 0
           for line in lines:
@@ -141,7 +198,7 @@ jobs:
                   else:
                       outbound_text = f"Proxy ({proxy_tag}); routing OK (direct {direct_count}, proxy {proxy_count})"
 
-          # 6. Brook Mode Log Extraction
+          # 7. Brook Mode Log Extraction
           spoofing_lines = [l for l in lines if "[Brook.Module.Spoofing]" in l]
           if not spoofing_lines:
               brook_status_text = "no WLOC logs"
@@ -159,7 +216,7 @@ jobs:
               parts.append(f"{error_count} errors")
               brook_status_text = "; ".join(parts)
 
-          # 7. DNS Analysis
+          # 8. DNS Analysis
           dns_answers = 0
           dns_rtts = []
           dns_not_found = 0
@@ -206,12 +263,12 @@ jobs:
                       issues.append(f"{dns_answers} answers")
                   dns_text = "Issues: " + ", ".join(issues)
 
-          # 8. Crash Section
-          crash_patterns = [
+          # 9. Crash Section
+          crash_patterns = (
               "Internal process crash:",
               "VPN ended unexpectedly:",
               "VPN restarted (previous session ended unexpectedly)"
-          ]
+          )
           crash_entries = []
           for line in lines:
               m_ts = re.search(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)", line)
@@ -233,7 +290,7 @@ jobs:
           | --- | --- |
           {c_rows}"""
 
-          # 9. Format Markdown
+          # 10. Format Final Issue Body
           formatted_body = f"""## Info
 
           | Field | Value |
@@ -259,13 +316,8 @@ jobs:
 
           {desc}
 
-          <details>
-          <summary>Original Log</summary>
-
-          ```log
-          {raw_log}
-          ```
-          </details>
+          ---
+          **Attached Log File:** [Download Log File]({download_url})
           """
 
           cleaned_body = "\n".join([line.strip() for line in formatted_body.splitlines()])
@@ -273,6 +325,10 @@ jobs:
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
               f.write(cleaned_body)
 
-          # Update the issue body and swap labels
-          subprocess.run(["gh", "issue", "edit", issue_number, "--body-file", "issue_formatted.md", "--remove-label", "manual-log-upload", "--add-label", "log-analyzed"], check=True)
+          subprocess.run([
+              "gh", "issue", "edit", issue_number,
+              "--body-file", "issue_formatted.md",
+              "--remove-label", "manual-log-upload",
+              "--add-label", "log-analyzed"
+          ], check=True)
           EOF
