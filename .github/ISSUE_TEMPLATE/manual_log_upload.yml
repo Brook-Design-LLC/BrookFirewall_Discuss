@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please provide an issue description and upload your `.txt` or `.log` file below. The automated bot will download the log, run analysis, and format this issue.
+        Please provide an issue description and upload your `.txt` or `.log` file below. The automated bot will download the log, run analysis, and format this issue. You may also attach optional screenshots or videos for context.
   - type: textarea
     id: description
     attributes:
@@ -19,7 +19,15 @@ body:
     id: log_file
     attributes:
       label: Log File Attachment
-      description: Drag and drop your `.txt` or `.log` file here.
+      description: Upload exactly one `.txt` or `.log` file. Only this file will be analyzed.
     validations:
       required: true
       accept: ".log,.txt"
+  - type: upload
+    id: media_attachments
+    attributes:
+      label: Screenshots / Videos
+      description: Optional images or videos for context. These are not analyzed by the bot.
+    validations:
+      required: false
+      accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm"
