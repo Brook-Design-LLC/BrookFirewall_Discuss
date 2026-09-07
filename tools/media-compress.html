@@ -89,7 +89,44 @@
       setStatus(`Done: ${formatSize(file.size)} → ${formatSize(blob.size)}\nSaved as ${outName}`);
     }
 
+    function downloadToBlobURL(url, mimeType, label) {
+      return fetch(url).then(async (resp) => {
+        if (!resp.ok) throw new Error(`Failed to download ${label} (${resp.status})`);
+        const total = Number(resp.headers.get('content-length')) || 0;
+        if (!resp.body || total <= 0) {
+          const buf = await resp.arrayBuffer();
+          return URL.createObjectURL(new Blob([buf], { type: mimeType }));
+        }
+        const reader = resp.body.getReader();
+        const chunks = [];
+        let received = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          progress.hidden = false;
+          progress.value = total > 0 ? Math.round((received / total) * 100) : 0;
+          setStatus(`Downloading ${label}… ${formatSize(received)}${total > 0 ? ` / ${formatSize(total)}` : ''}`);
+        }
+        const merged = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return URL.createObjectURL(new Blob([merged], { type: mimeType }));
+      });
+    }
+
+    async function readInputBytes(file) {
+      // Read immediately — waiting until after ffmpeg load can lock/disturb the body on WebKit.
+      const blob = file.slice(0, file.size, file.type || 'application/octet-stream');
+      return new Uint8Array(await blob.arrayBuffer());
+    }
+
     let ffmpegInstance = null;
+    let busy = false;
 
     async function loadFfmpeg() {
       if (ffmpegInstance?.loaded) return ffmpegInstance;
@@ -99,7 +136,6 @@
       progress.value = 0;
 
       const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/+esm');
-      const { fetchFile, toBlobURL } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/+esm');
 
       const ffmpeg = new FFmpeg();
       ffmpeg.on('log', ({ message }) => {
@@ -112,19 +148,12 @@
         progress.value = Math.round((p || 0) * 100);
       });
 
-      // UMD core works reliably in ffmpeg's internal worker; ESM core can hang at load.
       const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
-      const onDownload = ({ received, total }) => {
-        if (total > 0) {
-          progress.value = Math.round((received / total) * 100);
-          setStatus(`Downloading ffmpeg-core… ${formatSize(received)} / ${formatSize(total)}`);
-        }
-      };
 
       setStatus('Downloading ffmpeg-core.js…');
-      const coreURL = await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript', true, onDownload);
+      const coreURL = await downloadToBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript', 'ffmpeg-core.js');
       setStatus('Downloading ffmpeg-core.wasm…');
-      const wasmURL = await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm', true, onDownload);
+      const wasmURL = await downloadToBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm', 'ffmpeg-core.wasm');
 
       setStatus('Initializing ffmpeg… (compiling wasm, may take up to a minute)');
       progress.removeAttribute('value');
@@ -134,18 +163,16 @@
       progress.value = 0;
 
       ffmpegInstance = ffmpeg;
-      ffmpegInstance.fetchFile = fetchFile;
       return ffmpegInstance;
     }
 
-    async function compressWithFfmpeg(file) {
+    async function compressWithFfmpeg(file, inputBytes) {
       const ffmpeg = await loadFfmpeg();
-      const fetchFile = ffmpeg.fetchFile;
       const isAudio = file.type.startsWith('audio/') || /\.(m4a|mp3|aac|wav)$/i.test(file.name);
       const inName = 'input' + (file.name.match(/\.[^.]+$/)?.[0] || (isAudio ? '.m4a' : '.mp4'));
       const outName = isAudio ? 'output.m4a' : 'output.mp4';
 
-      await ffmpeg.writeFile(inName, await fetchFile(file));
+      await ffmpeg.writeFile(inName, inputBytes);
 
       let crf = 28;
       let scale = null;
@@ -155,20 +182,21 @@
         setStatus(`Compressing (pass ${i + 1})…`);
         progress.value = 0;
 
-        const args = ['-i', inName];
+        const args = ['-y', '-i', inName];
         if (isAudio) {
           args.push('-c:a', 'aac', '-b:a', '128k');
           if (i > 2) args.push('-b:a', '96k');
           if (i > 4) args.push('-b:a', '64k');
         } else {
-          args.push('-c:v', 'libx264', '-crf', String(crf), '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k');
+          args.push('-c:v', 'libx264', '-crf', String(crf), '-preset', 'fast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-c:a', 'aac', '-b:a', '128k');
           if (scale) args.push('-vf', scale);
         }
-        args.push('-y', outName);
+        args.push(outName);
 
         await ffmpeg.exec(args);
         const data = await ffmpeg.readFile(outName);
-        outBlob = new Blob([data.buffer], { type: isAudio ? 'audio/mp4' : 'video/mp4' });
+        outBlob = new Blob([data], { type: isAudio ? 'audio/mp4' : 'video/mp4' });
+        try { await ffmpeg.deleteFile(outName); } catch { /* ignore */ }
         if (outBlob.size <= MAX) break;
         if (isAudio) continue;
         crf = Math.min(crf + 4, 40);
@@ -187,6 +215,8 @@
     }
 
     async function handleFile(file) {
+      if (busy) return;
+      busy = true;
       try {
         setStatus(`Processing ${file.name} (${formatSize(file.size)})…`);
         if (file.size <= MAX) {
@@ -196,13 +226,18 @@
         if (file.type.startsWith('image/')) {
           await compressImage(file);
         } else if (file.type.startsWith('video/') || file.type.startsWith('audio/') || /\.(mp4|mov|webm|m4a|mp3)$/i.test(file.name)) {
-          await compressWithFfmpeg(file);
+          setStatus(`Reading ${file.name}…`);
+          const inputBytes = await readInputBytes(file);
+          await compressWithFfmpeg(file, inputBytes);
         } else {
           setStatus('Unsupported file type. Use an image or video file.');
         }
       } catch (err) {
         progress.hidden = true;
         setStatus(`Error: ${err.message}\nTry another file or compress manually.`);
+      } finally {
+        busy = false;
+        fileInput.value = '';
       }
     }
   </script>
