@@ -1,0 +1,278 @@
+name: Format Manual Log Issue
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  analyze-and-format:
+    if: contains(github.event.issue.labels.*.name, 'manual-log-upload')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse Log and Format Issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python3 - << 'EOF'
+          import os
+          import re
+          import subprocess
+
+          issue_body = os.environ.get("ISSUE_BODY", "")
+          issue_number = os.environ.get("ISSUE_NUMBER", "")
+
+          def extract_field(label: str, text: str) -> str:
+              pattern = rf"###\s+{re.escape(label)}\s*\n\n(.*?)(?=\n###|\Z)"
+              match = re.search(pattern, text, re.DOTALL)
+              return match.group(1).strip() if match else ""
+
+          desc = extract_field("Description", issue_body)
+          vpn_status = extract_field("VPN Status", issue_body) or "unknown"
+          raw_log = extract_field("Log Content", issue_body)
+
+          # Strip markdown code formatting
+          raw_log = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", raw_log)
+          raw_log = re.sub(r"\n```$", "", raw_log).strip()
+
+          lines = raw_log.splitlines()
+
+          def md_cell(val: str) -> str:
+              return val.replace("\n", " ").replace("|", "\\|").strip()
+
+          # 1. Info Header Extraction (Fallback to unknown)
+          info_dict = {
+              "OS": "unknown",
+              "Device": "unknown",
+              "Network": "unknown",
+              "App Ver": "unknown"
+          }
+
+          for line in lines[:20]:
+              if line.startswith("OS:"):
+                  info_dict["OS"] = line.split(":", 1)[1].strip() or "unknown"
+              elif line.startswith("Device:"):
+                  info_dict["Device"] = line.split(":", 1)[1].strip() or "unknown"
+              elif line.startswith("Network:"):
+                  info_dict["Network"] = line.split(":", 1)[1].strip() or "unknown"
+              elif line.startswith("App Version:"):
+                  info_dict["App Ver"] = line.split(":", 1)[1].strip() or "unknown"
+
+          # 2. Brook Mode Method
+          brook_method = "Inactive / Unknown"
+          if "Success, coordinates patched" in raw_log:
+              brook_method = "Override (Coordinates Patched)"
+          elif "Success, wloc rejected with 403" in raw_log:
+              brook_method = "Reject (403 Forbidden)"
+          elif re.search(r"taking detour \[block\] for \[tcp:gs-loc", raw_log):
+              brook_method = "Traditional (Detour Block)"
+
+          # 3. Network OK (Exclude gs-loc and ls.apple, verify DNS answer + active traffic)
+          dns_answered_domains = set()
+          for line in lines:
+              if "app/dns:" in line or "proxy/dns:" in line:
+                  m_ans = re.search(r"got answer:\s+([^\s]+)\.\s+Type", line)
+                  if m_ans:
+                      domain = m_ans.group(1).lower()
+                      if "gs-loc" not in domain and "ls.apple" not in domain:
+                          dns_answered_domains.add(domain)
+
+          conn_domains = {}
+          active_connections = set()
+
+          for line in lines:
+              m_sniff = re.search(r"\[(\d+)\] app/dispatcher: sniffed domain:\s+([^\s]+)", line)
+              if m_sniff:
+                  conn_domains[m_sniff.group(1)] = m_sniff.group(2).lower()
+
+              if "proxy: Xtls Unpadding new block" in line or "CopyRawConn" in line:
+                  m_cid = re.search(r"\[(\d+)\]", line)
+                  if m_cid:
+                      active_connections.add(m_cid.group(1))
+
+          network_ok_target = None
+          for cid in active_connections:
+              dom = conn_domains.get(cid)
+              if dom and dom in dns_answered_domains:
+                  network_ok_target = dom
+                  break
+
+          if network_ok_target:
+              network_ok_text = f"Yes ({network_ok_target} reachable)"
+          elif dns_answered_domains and active_connections:
+              network_ok_text = "Yes (traffic flow confirmed)"
+          else:
+              network_ok_text = "No (no external domain confirmed)"
+
+          # 4. UTUN Interface Status
+          utun_errors = raw_log.count("falied to set interface") + raw_log.count("failed to set interface")
+          utun_text = "OK" if utun_errors == 0 else f"{utun_errors} interface errors"
+
+          # 5. Outbound Routing
+          detour_counts = {}
+          direct_count = 0
+          for line in lines:
+              m = re.search(r"taking detour \[([^\]]+)\]", line)
+              if m:
+                  tag = m.group(1)
+                  if tag in ("dns-out", "mitm-loop", "tls-repack", "block"):
+                      continue
+                  if tag == "direct":
+                      direct_count += 1
+                  else:
+                      detour_counts[tag] = detour_counts.get(tag, 0) + 1
+
+          if not detour_counts:
+              outbound_text = "Direct"
+          else:
+              proxy_tag = max(detour_counts, key=detour_counts.get)
+              proxy_count = detour_counts[proxy_tag]
+              total_routing = direct_count + proxy_count
+              if total_routing == 0:
+                  outbound_text = f"Proxy ({proxy_tag}); no routing data in log"
+              else:
+                  direct_ratio = direct_count / total_routing
+                  if direct_ratio >= 0.8 and total_routing >= 5:
+                      outbound_text = f"Proxy ({proxy_tag}); possible misroute (mostly direct) (direct {direct_count}, proxy {proxy_count})"
+                  else:
+                      outbound_text = f"Proxy ({proxy_tag}); routing OK (direct {direct_count}, proxy {proxy_count})"
+
+          # 6. Brook Mode Log Extraction
+          spoofing_lines = [l for l in lines if "[Brook.Module.Spoofing]" in l]
+          if not spoofing_lines:
+              brook_status_text = "no WLOC logs"
+          else:
+              error_count = sum(1 for l in spoofing_lines if "[Error]" in l)
+              last_success = None
+              for l in spoofing_lines:
+                  if "Success, coordinates patched" in l or "Success, wloc rejected with 403" in l:
+                      m_ts = re.search(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)", l)
+                      if m_ts:
+                          last_success = m_ts.group(1)
+              parts = ["WLOC logs present"]
+              if last_success:
+                  parts.append(f"last success {last_success}")
+              parts.append(f"{error_count} errors")
+              brook_status_text = "; ".join(parts)
+
+          # 7. DNS Analysis
+          dns_answers = 0
+          dns_rtts = []
+          dns_not_found = 0
+          dns_no_resp = 0
+
+          got_answer_pat = re.compile(r"got answer:\s+([^\s]+)\.\s+Type[^-]+->\s+\[([^\]]*)\],\s+rtt:\s*([\d.]+)ms")
+          for line in lines:
+              if "app/dns:" not in line and "proxy/dns:" not in line:
+                  continue
+              m = got_answer_pat.search(line)
+              if m:
+                  if m.group(2).strip():
+                      dns_answers += 1
+                      try:
+                          dns_rtts.append(float(m.group(3)))
+                      except ValueError:
+                          pass
+                  continue
+              if "returning nil for domain" in line:
+                  dns_not_found += 1
+                  continue
+              if "failed to retrieve response for" in line:
+                  dns_no_resp += 1
+                  continue
+
+          total_dns = dns_answers + dns_not_found + dns_no_resp
+          if total_dns == 0:
+              dns_text = "No DNS activity in log"
+          else:
+              avg_ms = round(sum(dns_rtts) / len(dns_rtts)) if dns_rtts else None
+              is_slow = (avg_ms is not None) and (avg_ms > 1000)
+              if dns_not_found == 0 and dns_no_resp == 0 and not is_slow:
+                  dns_text = f"OK ({dns_answers} answers, avg {avg_ms}ms)" if avg_ms is not None else f"OK ({dns_answers} answers)"
+              else:
+                  issues = []
+                  if dns_not_found > 0:
+                      issues.append(f"{dns_not_found} not found")
+                  if dns_no_resp > 0:
+                      issues.append(f"{dns_no_resp} no response")
+                  if avg_ms is not None:
+                      avg_lbl = f"{avg_ms/1000.0:.1f}s (slow)" if is_slow else f"{avg_ms}ms"
+                      issues.append(f"avg {avg_lbl}")
+                  elif dns_answers > 0:
+                      issues.append(f"{dns_answers} answers")
+                  dns_text = "Issues: " + ", ".join(issues)
+
+          # 8. Crash Section
+          crash_patterns = [
+              "Internal process crash:",
+              "VPN ended unexpectedly:",
+              "VPN restarted (previous session ended unexpectedly)"
+          ]
+          crash_entries = []
+          for line in lines:
+              m_ts = re.search(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)", line)
+              if not m_ts:
+                  continue
+              ts = m_ts.group(1)
+              msg = line.split(" : ", 1)[1].strip() if " : " in line else line.strip()
+              if "[Crash]" in line or any(p in msg for p in crash_patterns):
+                  crash_entries.append((ts, msg))
+
+          crash_section = ""
+          if crash_entries:
+              c_rows = "\n".join([f"| {md_cell(ts)} UTC | {md_cell(msg)} |" for ts, msg in crash_entries])
+              crash_section = f"""
+
+          ## Crash
+
+          | Time (UTC) | Message |
+          | --- | --- |
+          {c_rows}"""
+
+          # 9. Format Markdown
+          formatted_body = f"""## Info
+
+          | Field | Value |
+          | --- | --- |
+          | OS | {md_cell(info_dict['OS'])} |
+          | Device | {md_cell(info_dict['Device'])} |
+          | Network | {md_cell(info_dict['Network'])} |
+          | VPN Status | {md_cell(vpn_status)} |
+          | App Ver | {md_cell(info_dict['App Ver'])} |
+          | Brook Mode Method | {md_cell(brook_method)} |
+
+          ## Status
+
+          | Component | Result |
+          | --- | --- |
+          | DNS | {md_cell(dns_text)} |
+          | Network OK | {md_cell(network_ok_text)} |
+          | UTUN Interface | {md_cell(utun_text)} |
+          | Outbound | {md_cell(outbound_text)} |
+          | Brook Mode | {md_cell(brook_status_text)} |{crash_section}
+
+          ## Description
+
+          {desc}
+
+          <details>
+          <summary>Original Log</summary>
+
+          ```log
+          {raw_log}
+          ```
+          </details>
+          """
+
+          cleaned_body = "\n".join([line.strip() for line in formatted_body.splitlines()])
+
+          with open("issue_formatted.md", "w", encoding="utf-8") as f:
+              f.write(cleaned_body)
+
+          # Update the issue body and swap labels
+          subprocess.run(["gh", "issue", "edit", issue_number, "--body-file", "issue_formatted.md", "--remove-label", "manual-log-upload", "--add-label", "log-analyzed"], check=True)
+          EOF
