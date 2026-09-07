@@ -2,56 +2,73 @@ name: Format Manual Log Issue
 
 on:
   issues:
-    types: [opened]
+    types: [opened, edited]
 
 permissions:
   issues: write
 
 jobs:
   analyze-and-format:
-    # Check issue body directly to avoid the race condition where labels are empty on 'opened'
-    if: contains(github.event.issue.body, '### Log File Attachment')
+    if: |
+      !contains(join(github.event.issue.labels.*.name, ','), 'log-analyzed') &&
+      contains(github.event.issue.body, '### Log File Attachment')
     runs-on: ubuntu-latest
     steps:
       - name: Download Log File and Format Issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
+          REPOSITORY: ${{ github.repository }}
         run: |
+          gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}" --jq .body > issue_body.md
+
           python3 - << 'EOF'
           import os
           import re
           import subprocess
+          import time
           import urllib.request
 
-          issue_body = os.environ.get("ISSUE_BODY", "")
           issue_number = os.environ.get("ISSUE_NUMBER", "")
           gh_token = os.environ.get("GH_TOKEN", "")
+
+          with open("issue_body.md", encoding="utf-8") as f:
+              issue_body = f.read()
 
           def extract_field(label: str, text: str) -> str:
               pattern = rf"###\s+{re.escape(label)}\s*\n\n(.*?)(?=\n###|\Z)"
               match = re.search(pattern, text, re.DOTALL)
               return match.group(1).strip() if match else ""
 
+          ATTACHMENT_URL_PATTERNS = [
+              r"https://github\.com/user-attachments/assets/[a-f0-9\-]+",
+              r"https://github\.com/[^/\s\)\>]+/[^/\s\)\>]+/files/\d+/[^\s\)\>]+",
+              r"https://github\.com/[^\s\)\>]+/user-attachments/files/\d+/[^\s\)\>]+",
+              r"https://(?:private-)?user-images\.githubusercontent\.com/[^\s\)\>]+",
+          ]
+
+          def find_attachment_url(text: str) -> str | None:
+              for pattern in ATTACHMENT_URL_PATTERNS:
+                  match = re.search(pattern, text)
+                  if match:
+                      return match.group(0)
+              link_match = re.search(r"\]\((https?://[^\)]+)\)", text)
+              if link_match:
+                  return link_match.group(1)
+              return None
+
           desc = extract_field("Description", issue_body)
           log_field = extract_field("Log File Attachment", issue_body)
 
-          # Extract file attachment URL
-          url_match = re.search(r'https?://[^\s\)\>]+(?:github\.com/[^\s\)\>]+/(?:files|user-attachments/files)/[^\s\)\>]+)', log_field)
-          if not url_match:
-              url_match = re.search(r'https?://[^\s\)\>]+(?:github\.com/[^\s\)\>]+/(?:files|user-attachments/files)/[^\s\)\>]+)', issue_body)
+          download_url = find_attachment_url(log_field) or find_attachment_url(issue_body)
 
-          if not url_match:
+          if not download_url:
               error_body = f"{desc}\n\n> [!WARNING]\n> **No log file attachment detected.** Please edit this issue and attach a valid `.txt` or `.log` file."
               with open("issue_formatted.md", "w", encoding="utf-8") as f:
                   f.write(error_body)
               subprocess.run(["gh", "issue", "edit", issue_number, "--body-file", "issue_formatted.md"], check=True)
               exit(0)
 
-          download_url = url_match.group(0)
-
-          # Strip Authorization header when redirecting off github.com (e.g., AWS S3 pre-signed URLs)
           class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, req, fp, code, msg, headers, newurl):
                   new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -60,22 +77,44 @@ jobs:
                   return new_req
 
           opener = urllib.request.build_opener(SafeRedirectHandler())
-          req = urllib.request.Request(download_url)
-          if gh_token:
-              req.add_header("Authorization", f"Bearer {gh_token}")
 
-          try:
-              with opener.open(req) as resp:
-                  raw_log = resp.read().decode("utf-8", errors="replace")
-          except Exception as e:
-              raw_log = ""
+          def download_log(url: str) -> tuple[str, str | None]:
+              req = urllib.request.Request(url)
+              if gh_token:
+                  req.add_header("Authorization", f"Bearer {gh_token}")
+              try:
+                  with opener.open(req) as resp:
+                      return resp.read().decode("utf-8", errors="replace"), None
+              except Exception as e:
+                  return "", str(e)
+
+          raw_log = ""
+          download_error = None
+          for attempt, delay in enumerate([0, 10, 20, 30]):
+              if delay:
+                  time.sleep(delay)
+              raw_log, download_error = download_log(download_url)
+              if raw_log:
+                  break
+
+          if not raw_log:
+              error_body = (
+                  f"{desc}\n\n"
+                  f"> [!WARNING]\n"
+                  f"> **Failed to download log file.** URL: `{download_url}`\n"
+                  f"> Error: {download_error or 'unknown error'}\n"
+                  f"> Please try re-uploading the log file or edit this issue to trigger re-analysis."
+              )
+              with open("issue_formatted.md", "w", encoding="utf-8") as f:
+                  f.write(error_body)
+              subprocess.run(["gh", "issue", "edit", issue_number, "--body-file", "issue_formatted.md"], check=True)
+              exit(0)
 
           lines = raw_log.splitlines()
 
           def md_cell(val: str) -> str:
               return val.replace("\n", " ").replace("|", "\\|").strip()
 
-          # 1. Info Header Extraction
           info_dict = {
               "OS": "unknown",
               "Device": "unknown",
@@ -93,7 +132,6 @@ jobs:
               elif line.startswith("App Version:"):
                   info_dict["App Ver"] = line.split(":", 1)[1].strip() or "unknown"
 
-          # 2. Automated VPN Status Detection
           traffic_indicators = (
               "proxy/tun: processing",
               "taking detour",
@@ -118,7 +156,6 @@ jobs:
               )
               vpn_status = "Connected" if has_traffic_after else "Disconnected"
 
-          # 3. Brook Mode Method
           brook_method = "Inactive / Unknown"
           if "Success, coordinates patched" in raw_log:
               brook_method = "Override (Coordinates Patched)"
@@ -127,7 +164,6 @@ jobs:
           elif re.search(r"taking detour \[block\] for \[tcp:gs-loc", raw_log):
               brook_method = "Traditional (Detour Block)"
 
-          # 4. Network Reachability Check
           dns_answered_domains = set()
           for line in lines:
               if "app/dns:" in line or "proxy/dns:" in line:
@@ -164,11 +200,9 @@ jobs:
           else:
               network_ok_text = "No (no external domain confirmed)"
 
-          # 5. UTUN Interface Status
           utun_errors = raw_log.count("falied to set interface") + raw_log.count("failed to set interface")
           utun_text = "OK" if utun_errors == 0 else f"{utun_errors} interface errors"
 
-          # 6. Outbound Routing
           detour_counts = {}
           direct_count = 0
           for line in lines:
@@ -197,7 +231,6 @@ jobs:
                   else:
                       outbound_text = f"Proxy ({proxy_tag}); routing OK (direct {direct_count}, proxy {proxy_count})"
 
-          # 7. Brook Mode Log Extraction
           spoofing_lines = [l for l in lines if "[Brook.Module.Spoofing]" in l]
           if not spoofing_lines:
               brook_status_text = "no WLOC logs"
@@ -215,7 +248,6 @@ jobs:
               parts.append(f"{error_count} errors")
               brook_status_text = "; ".join(parts)
 
-          # 8. DNS Analysis
           dns_answers = 0
           dns_rtts = []
           dns_not_found = 0
@@ -262,7 +294,6 @@ jobs:
                       issues.append(f"{dns_answers} answers")
                   dns_text = "Issues: " + ", ".join(issues)
 
-          # 9. Crash Section
           crash_patterns = (
               "Internal process crash:",
               "VPN ended unexpectedly:",
@@ -289,7 +320,6 @@ jobs:
           | --- | --- |
           {c_rows}"""
 
-          # 10. Format Output
           formatted_body = f"""## Info
 
           | Field | Value |
@@ -324,7 +354,6 @@ jobs:
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
               f.write(cleaned_body)
 
-          # Update the issue body and attach the status label
           subprocess.run([
               "gh", "issue", "edit", issue_number,
               "--body-file", "issue_formatted.md",

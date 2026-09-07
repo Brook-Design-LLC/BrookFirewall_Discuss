@@ -15,11 +15,11 @@ body:
       placeholder: e.g., Connection dropped after 10 minutes...
     validations:
       required: true
-  - type: textarea
+  - type: upload
     id: log_file
     attributes:
       label: Log File Attachment
-      description: Drag and drop your `.txt` or `.log` file into the box below.
-      placeholder: Drag and drop log file here...
+      description: Drag and drop your `.txt` or `.log` file here.
     validations:
       required: true
+      accept: ".log,.txt"

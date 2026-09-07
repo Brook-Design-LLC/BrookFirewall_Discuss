@@ -1,0 +1,61 @@
+name: Issue Report
+description: Report BrookFirewall issue...
+title: "[Report] "
+labels: ["issue"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill out the form below to report an issue with BrookFirewall.
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: iOS version (e.g., iOS 18.0)
+      placeholder: e.g., iOS 18.0
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Device model
+      placeholder: e.g., iPhone 15 Pro
+    validations:
+      required: true
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network
+      description: Network type used when the issue occurred
+      options:
+        - WiFi
+        - Cellular
+        - WiFi + Cellular
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: app_version
+    attributes:
+      label: App Version
+      description: BrookFirewall app version
+      placeholder: e.g., 1.2.3
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe what happened
+      placeholder: What were you doing when the issue occurred?
+    validations:
+      required: true
+  - type: upload
+    id: attachments
+    attributes:
+      label: Attachments
+      description: Screenshots, videos, or log files (optional)
+    validations:
+      required: false
+      accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.log,.txt"

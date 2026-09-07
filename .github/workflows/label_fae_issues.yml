@@ -1,0 +1,46 @@
+name: Label FAE Issues
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  label-fae:
+    if: github.event.issue.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add FAE label for org team members
+        env:
+          ORG_READ_TOKEN: ${{ secrets.ORG_READ_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          TEAM_SLUG: fae
+          AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ -z "$ORG_READ_TOKEN" ]; then
+            echo "ORG_READ_TOKEN is not configured. Add a PAT with read:org scope as a repository secret."
+            exit 0
+          fi
+
+          export GH_TOKEN="$ORG_READ_TOKEN"
+
+          if ! gh api "orgs/${ORG}/members/${AUTHOR}" --silent 2>/dev/null; then
+            echo "${AUTHOR} is not a member of ${ORG}; skipping."
+            exit 0
+          fi
+
+          membership_state="$(gh api "orgs/${ORG}/teams/${TEAM_SLUG}/memberships/${AUTHOR}" --jq .state 2>/dev/null || true)"
+          if [ "$membership_state" != "active" ]; then
+            echo "${AUTHOR} is not an active member of team ${TEAM_SLUG}; skipping."
+            exit 0
+          fi
+
+          export GH_TOKEN="$GITHUB_TOKEN"
+          gh label create "FAE" --repo "$REPOSITORY" --color "0E8A16" --description "Created by FAE team member" --force
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPOSITORY" --add-label "FAE"
+          echo "Added FAE label to issue #${ISSUE_NUMBER} for ${AUTHOR}."
