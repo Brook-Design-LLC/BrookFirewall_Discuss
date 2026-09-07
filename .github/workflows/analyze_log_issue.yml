@@ -17,6 +17,7 @@ jobs:
       - name: Download Log File and Format Issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ATTACHMENT_DOWNLOAD_TOKEN: ${{ secrets.ATTACHMENT_DOWNLOAD_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -30,11 +31,14 @@ jobs:
           import re
           import subprocess
           import time
+          import urllib.error
+          import urllib.parse
           import urllib.request
 
           issue_number = os.environ.get("ISSUE_NUMBER", "")
           repository = os.environ.get("REPOSITORY", "")
           gh_token = os.environ.get("GH_TOKEN", "")
+          attachment_token = os.environ.get("ATTACHMENT_DOWNLOAD_TOKEN", "") or gh_token
 
           def gh_issue_edit(body_file: str, add_label: str | None = None) -> None:
               cmd = ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", body_file]
@@ -122,17 +126,34 @@ jobs:
                   return link_match.group(1)
               return None
 
+          def extract_pasted_log(text: str) -> str:
+              stripped = text.strip()
+              if not stripped:
+                  return ""
+              if re.fullmatch(r"https?://[^\s]+", stripped):
+                  return ""
+              if re.fullmatch(r"\[[^\]]*\]\(https?://[^\)]+\)", stripped):
+                  return ""
+              if "\n" not in stripped and stripped.startswith("http"):
+                  return ""
+              return stripped
+
           desc = extract_field("Description", issue_body)
           log_field = extract_field("Log File Attachment", issue_body)
 
-          download_url = find_attachment_url(log_field) or find_attachment_url(issue_body)
+          raw_log = extract_pasted_log(log_field)
+          download_url = find_attachment_url(log_field) or find_attachment_url(issue_body) or ""
 
-          if not download_url:
-              error_body = f"{desc}\n\n> [!WARNING]\n> **No log file attachment detected.** Please edit this issue and attach a valid `.txt` or `.log` file."
+          if not raw_log and not download_url:
+              error_body = f"{desc}\n\n> [!WARNING]\n> **No log content detected.** Please edit this issue and paste your full `.txt` or `.log` file contents into the Log File Attachment field."
               with open("issue_formatted.md", "w", encoding="utf-8") as f:
                   f.write(error_body)
               gh_issue_edit("issue_formatted.md")
               exit(0)
+
+          class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
 
           class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -141,44 +162,97 @@ jobs:
                       del new_req.headers["Authorization"]
                   return new_req
 
-          opener = urllib.request.build_opener(SafeRedirectHandler())
+          def resolve_presigned_url(file_url: str, token: str) -> tuple[str | None, str | None]:
+              parsed = urllib.parse.urlparse(file_url.split("?", 1)[0])
+              if parsed.hostname != "github.com" or not parsed.path.startswith("/user-attachments/"):
+                  return None, "not a github user-attachments URL"
 
-          def download_log(url: str) -> tuple[str, str | None]:
+              resolve_url = urllib.parse.urlunparse(("https", "github.com", parsed.path, "", "", ""))
+              req = urllib.request.Request(resolve_url)
+              req.add_header("Authorization", f"Bearer {token}")
+              req.add_header("User-Agent", "GitHub-Actions-Log-Analyzer")
+              opener = urllib.request.build_opener(NoRedirectHandler())
+
+              try:
+                  opener.open(req)
+                  return None, "expected redirect, got success"
+              except urllib.error.HTTPError as e:
+                  if 300 <= e.code < 400:
+                      location = e.headers.get("Location")
+                      if location:
+                          return location, None
+                      return None, "redirect without location"
+                  return None, f"HTTP Error {e.code}: {e.reason}"
+              except Exception as e:
+                  return None, str(e)
+
+          def fetch_presigned(presigned_url: str) -> tuple[str, str | None]:
+              req = urllib.request.Request(presigned_url)
+              req.add_header("User-Agent", "GitHub-Actions-Log-Analyzer")
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      return resp.read().decode("utf-8", errors="replace"), None
+              except Exception as e:
+                  return "", str(e)
+
+          def download_log(url: str, token: str) -> tuple[str, str | None]:
+              if "github.com/user-attachments/" in url:
+                  presigned, err = resolve_presigned_url(url, token)
+                  if presigned:
+                      content, fetch_err = fetch_presigned(presigned)
+                      if content:
+                          return content, None
+                      if fetch_err:
+                          return "", fetch_err
+                  if err:
+                      return "", err
+
               req = urllib.request.Request(url)
-              if gh_token:
-                  req.add_header("Authorization", f"Bearer {gh_token}")
+              if token:
+                  req.add_header("Authorization", f"Bearer {token}")
               req.add_header("Accept", "application/octet-stream")
               req.add_header("User-Agent", "GitHub-Actions-Log-Analyzer")
+              opener = urllib.request.build_opener(SafeRedirectHandler())
               try:
                   with opener.open(req) as resp:
                       return resp.read().decode("utf-8", errors="replace"), None
               except Exception as e:
                   return "", str(e)
 
-          body_html = get_issue_body_html()
-          candidate_urls = resolve_download_urls(download_url, body_html)
+          if not raw_log and download_url:
+              body_html = get_issue_body_html()
+              candidate_urls = resolve_download_urls(download_url, body_html)
+              tokens_to_try = []
+              if os.environ.get("ATTACHMENT_DOWNLOAD_TOKEN"):
+                  tokens_to_try.append(os.environ["ATTACHMENT_DOWNLOAD_TOKEN"])
+              if gh_token and gh_token not in tokens_to_try:
+                  tokens_to_try.append(gh_token)
 
-          raw_log = ""
-          download_error = None
-          for attempt, delay in enumerate([0, 10, 20, 30]):
-              if delay:
-                  time.sleep(delay)
-              for candidate_url in candidate_urls:
-                  raw_log, download_error = download_log(candidate_url)
+              download_error = None
+              for attempt, delay in enumerate([0, 10, 20, 30]):
+                  if delay:
+                      time.sleep(delay)
+                  for token in tokens_to_try:
+                      for candidate_url in candidate_urls:
+                          raw_log, download_error = download_log(candidate_url, token)
+                          if raw_log:
+                              download_url = candidate_url
+                              break
+                      if raw_log:
+                          break
                   if raw_log:
-                      download_url = candidate_url
                       break
-              if raw_log:
-                  break
 
           if not raw_log:
               error_body = (
                   f"{desc}\n\n"
                   f"> [!WARNING]\n"
-                  f"> **Failed to download log file.** URL: `{download_url}`\n"
-                  f"> Error: {download_error or 'unknown error'}\n"
-                  f"> Please try re-uploading the log file or edit this issue to trigger re-analysis."
+                  f"> **Failed to read log file.**\n"
+                  f"> GitHub Actions cannot download `.log` / `.txt` file attachments automatically.\n"
+                  f"> Please edit this issue, open your log file, **paste the full contents** into the Log File Attachment field, and save to trigger re-analysis."
               )
+              if download_url:
+                  error_body += f"\n> Attachment URL: `{download_url}`\n> Error: {download_error or 'unknown error'}"
               with open("issue_formatted.md", "w", encoding="utf-8") as f:
                   f.write(error_body)
               gh_issue_edit("issue_formatted.md")
@@ -394,6 +468,12 @@ jobs:
           | --- | --- |
           {c_rows}"""
 
+          log_source_section = (
+              f"---\n**Attached Log File:** [Download Log File]({download_url})"
+              if download_url
+              else "---\n**Log Source:** pasted log content"
+          )
+
           formatted_body = f"""## Info
 
           | Field | Value |
@@ -419,8 +499,7 @@ jobs:
 
           {desc}
 
-          ---
-          **Attached Log File:** [Download Log File]({download_url})
+          {log_source_section}
           """
 
           cleaned_body = "\n".join([line.strip() for line in formatted_body.splitlines()])
