@@ -23,11 +23,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/configure-pages@v5
+      - name: Verify GH_PAT for Pages enablement
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "${GH_PAT}" ]; then
+            echo "::error::GH_PAT secret is required to enable GitHub Pages automatically."
+            echo "Add a Classic PAT with repo scope as the GH_PAT Actions secret,"
+            echo "or enable Pages manually: Settings → Pages → Build and deployment → Source: GitHub Actions."
+            exit 1
+          fi
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+          token: ${{ secrets.GH_PAT }}
 
       - uses: actions/upload-pages-artifact@v3
         with:
           path: tools
 
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
