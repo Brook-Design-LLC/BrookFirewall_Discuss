@@ -13,6 +13,9 @@
     #status { margin-top: 1rem; white-space: pre-wrap; font-size: 0.9rem; }
     .hint { color: #656d76; font-size: 0.85rem; }
     progress { width: 100%; margin-top: 0.5rem; }
+    progress.indeterminate::-webkit-progress-bar { background: #eaeef2; }
+    progress.indeterminate::-webkit-progress-value { background: #0969da; animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
   </style>
 </head>
 <body>
@@ -86,49 +89,6 @@
       setStatus(`Done: ${formatSize(file.size)} → ${formatSize(blob.size)}\nSaved as ${outName}`);
     }
 
-    async function fetchWithProgress(url, onProgress) {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Failed to download ${url} (${response.status})`);
-      const total = Number(response.headers.get('content-length')) || 0;
-      if (!response.body) {
-        const buf = await response.arrayBuffer();
-        onProgress?.(buf.byteLength, total || buf.byteLength);
-        return buf;
-      }
-      const reader = response.body.getReader();
-      const chunks = [];
-      let loaded = 0;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        loaded += value.length;
-        onProgress?.(loaded, total);
-      }
-      const merged = new Uint8Array(loaded);
-      let offset = 0;
-      for (const chunk of chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.length;
-      }
-      return merged.buffer;
-    }
-
-    async function toBlobURLWithProgress(url, mimeType, label) {
-      setStatus(`Downloading ${label}…`);
-      const buf = await fetchWithProgress(url, (loaded, total) => {
-        if (total > 0) {
-          progress.hidden = false;
-          progress.value = Math.round((loaded / total) * 100);
-          setStatus(`Downloading ${label}… ${formatSize(loaded)} / ${formatSize(total)}`);
-        } else {
-          setStatus(`Downloading ${label}… ${formatSize(loaded)}`);
-        }
-      });
-      const blob = new Blob([buf], { type: mimeType });
-      return URL.createObjectURL(blob);
-    }
-
     let ffmpegInstance = null;
 
     async function loadFfmpeg() {
@@ -139,25 +99,39 @@
       progress.value = 0;
 
       const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/+esm');
-      const { fetchFile } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/+esm');
+      const { fetchFile, toBlobURL } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/+esm');
 
       const ffmpeg = new FFmpeg();
       ffmpeg.on('log', ({ message }) => {
-        if (message.includes('Error') || message.includes('error')) {
-          console.warn('[ffmpeg]', message);
+        console.log('[ffmpeg]', message);
+        if (/error|fail|warn/i.test(message)) {
+          setStatus(`Initializing ffmpeg…\n${message}`);
         }
       });
       ffmpeg.on('progress', ({ progress: p }) => {
         progress.value = Math.round((p || 0) * 100);
       });
 
-      const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
-      const coreURL = await toBlobURLWithProgress(`${base}/ffmpeg-core.js`, 'text/javascript', 'ffmpeg-core.js');
-      const wasmURL = await toBlobURLWithProgress(`${base}/ffmpeg-core.wasm`, 'application/wasm', 'ffmpeg-core.wasm');
+      // UMD core works reliably in ffmpeg's internal worker; ESM core can hang at load.
+      const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+      const onDownload = ({ received, total }) => {
+        if (total > 0) {
+          progress.value = Math.round((received / total) * 100);
+          setStatus(`Downloading ffmpeg-core… ${formatSize(received)} / ${formatSize(total)}`);
+        }
+      };
 
-      setStatus('Initializing ffmpeg…');
-      progress.value = 0;
+      setStatus('Downloading ffmpeg-core.js…');
+      const coreURL = await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript', true, onDownload);
+      setStatus('Downloading ffmpeg-core.wasm…');
+      const wasmURL = await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm', true, onDownload);
+
+      setStatus('Initializing ffmpeg… (compiling wasm, may take up to a minute)');
+      progress.removeAttribute('value');
+      progress.classList.add('indeterminate');
       await ffmpeg.load({ coreURL, wasmURL });
+      progress.classList.remove('indeterminate');
+      progress.value = 0;
 
       ffmpegInstance = ffmpeg;
       ffmpegInstance.fetchFile = fetchFile;
