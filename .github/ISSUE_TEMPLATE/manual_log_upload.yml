@@ -6,7 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please provide an issue description and upload your `.txt` or `.log` file below. The automated bot will download the log, run analysis, and format this issue.
+        Please provide an issue description and paste your log contents below. The automated bot will analyze the log and format this issue.
+
+        **Important:** Open your `.txt` or `.log` file and paste the full contents into the field below. File uploads cannot be processed automatically by GitHub Actions.
   - type: textarea
     id: description
     attributes:
@@ -15,11 +17,17 @@ body:
       placeholder: e.g., Connection dropped after 10 minutes...
     validations:
       required: true
-  - type: upload
+  - type: textarea
     id: log_file
     attributes:
       label: Log File Attachment
-      description: Drag and drop your `.txt` or `.log` file here.
+      description: Paste the full contents of your `.txt` or `.log` file here.
+      placeholder: |
+        OS: iOS 18.0
+        Device: iPhone 15 Pro
+        Network: WiFi
+        App Version: 1.0.0
+
+        Paste the rest of your log below...
     validations:
       required: true
-      accept: ".log,.txt"
