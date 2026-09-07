@@ -10,7 +10,7 @@ permissions:
 jobs:
   analyze-and-format:
     if: |
-      !contains(join(github.event.issue.labels.*.name, ','), 'log-analyzed') &&
+      !contains(github.event.issue.body, '## Info') &&
       contains(github.event.issue.body, '### Log File Attachment')
     runs-on: ubuntu-latest
     steps:
@@ -27,8 +27,6 @@ jobs:
         run: |
           set -euo pipefail
           export GH_REPO="${REPOSITORY}"
-
-          gh label create "log-analyzed" --color "1d76db" --description "Automated log analysis completed" --repo "${REPOSITORY}" 2>/dev/null || true
 
           gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}" --jq .body > issue_body.md
 
@@ -67,8 +65,12 @@ jobs:
                       urls.append(url)
               return urls
 
+          def is_log_url(url: str) -> bool:
+              return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
+
           log_field = extract_field("Log File Attachment", body)
-          log_urls = find_all_attachment_urls(log_field)
+          all_urls = find_all_attachment_urls(log_field)
+          log_urls = [u for u in all_urls if is_log_url(u)]
           if len(log_urls) > 1:
               print("MULTIPLE")
           elif len(log_urls) == 0:
@@ -240,10 +242,10 @@ jobs:
           repository = os.environ.get("REPOSITORY", "")
           download_url = os.environ.get("DOWNLOAD_URL", "")
 
-          def gh_issue_edit(body_file: str, add_label: str | None = None) -> None:
+          def gh_issue_edit(body_file: str, title: str | None = None) -> None:
               cmd = ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", body_file]
-              if add_label:
-                  cmd.extend(["--add-label", add_label])
+              if title:
+                  cmd.extend(["--title", title])
               subprocess.run(cmd, check=True)
 
           with open("issue_body.md", encoding="utf-8") as f:
@@ -256,8 +258,24 @@ jobs:
               match = re.search(pattern, text, re.DOTALL)
               return match.group(1).strip() if match else ""
 
+          def is_log_url(url: str) -> bool:
+              return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
+
           desc = extract_field("Description", issue_body)
-          media = extract_field("Screenshots / Videos", issue_body).strip()
+          log_field = extract_field("Log File Attachment", issue_body)
+          legacy_media = extract_field("Screenshots / Videos", issue_body).strip()
+          media_lines = []
+          for line in log_field.splitlines():
+              stripped = line.strip()
+              if not stripped:
+                  continue
+              if download_url in stripped and is_log_url(download_url):
+                  continue
+              if stripped == download_url:
+                  continue
+              media_lines.append(line)
+          media_from_field = "\n".join(media_lines).strip()
+          media = legacy_media or media_from_field
           media_section = f"\n\n## Screenshots / Videos\n\n{media}" if media else ""
           lines = raw_log.splitlines()
 
@@ -503,5 +521,17 @@ jobs:
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
               f.write(cleaned_body)
 
-          gh_issue_edit("issue_formatted.md", add_label="log-analyzed")
+          title_result = subprocess.run(
+              ["gh", "api", f"repos/{repository}/issues/{issue_number}", "--jq", ".title"],
+              capture_output=True,
+              text=True,
+              check=True,
+          )
+          current_title = title_result.stdout.strip()
+          if current_title.startswith("[Report]"):
+              new_title = current_title
+          else:
+              new_title = re.sub(r"^\[Log Analysis\]:?\s*", "[Report] ", current_title)
+
+          gh_issue_edit("issue_formatted.md", title=new_title)
           EOF

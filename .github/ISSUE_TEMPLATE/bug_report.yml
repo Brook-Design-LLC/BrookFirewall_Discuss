@@ -1,7 +1,6 @@
 name: Issue Report
 description: Report BrookFirewall issue...
 title: "[Report] "
-labels: ["issue"]
 body:
   - type: markdown
     attributes:
@@ -55,7 +54,7 @@ body:
     id: attachments
     attributes:
       label: Attachments
-      description: Screenshots, videos, or log files (optional)
+      description: Optional screenshots, videos, or log files.
     validations:
       required: false
-      accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.log,.txt"
+      accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm,.log,.txt"
