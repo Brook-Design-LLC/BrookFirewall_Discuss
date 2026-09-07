@@ -20,6 +20,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          export GH_REPO="${REPOSITORY}"
           gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}" --jq .body > issue_body.md
 
           python3 - << 'EOF'
@@ -30,7 +31,14 @@ jobs:
           import urllib.request
 
           issue_number = os.environ.get("ISSUE_NUMBER", "")
+          repository = os.environ.get("REPOSITORY", "")
           gh_token = os.environ.get("GH_TOKEN", "")
+
+          def gh_issue_edit(body_file: str, add_label: str | None = None) -> None:
+              cmd = ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", body_file]
+              if add_label:
+                  cmd.extend(["--add-label", add_label])
+              subprocess.run(cmd, check=True)
 
           with open("issue_body.md", encoding="utf-8") as f:
               issue_body = f.read()
@@ -66,7 +74,7 @@ jobs:
               error_body = f"{desc}\n\n> [!WARNING]\n> **No log file attachment detected.** Please edit this issue and attach a valid `.txt` or `.log` file."
               with open("issue_formatted.md", "w", encoding="utf-8") as f:
                   f.write(error_body)
-              subprocess.run(["gh", "issue", "edit", issue_number, "--body-file", "issue_formatted.md"], check=True)
+              gh_issue_edit("issue_formatted.md")
               exit(0)
 
           class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -107,7 +115,7 @@ jobs:
               )
               with open("issue_formatted.md", "w", encoding="utf-8") as f:
                   f.write(error_body)
-              subprocess.run(["gh", "issue", "edit", issue_number, "--body-file", "issue_formatted.md"], check=True)
+              gh_issue_edit("issue_formatted.md")
               exit(0)
 
           lines = raw_log.splitlines()
@@ -354,9 +362,5 @@ jobs:
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
               f.write(cleaned_body)
 
-          subprocess.run([
-              "gh", "issue", "edit", issue_number,
-              "--body-file", "issue_formatted.md",
-              "--add-label", "log-analyzed"
-          ], check=True)
+          gh_issue_edit("issue_formatted.md", add_label="log-analyzed")
           EOF
