@@ -21,8 +21,7 @@ jobs:
       - name: Download log and format issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_PAT: ${{ secrets.GH_PAT }}
-          GH_ATTACH_SESSION_TOKEN: ${{ secrets.GH_ATTACH_SESSION_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -96,7 +95,7 @@ jobs:
             exit 0
           fi
 
-          if [ -z "${GITHUB_PAT:-}" ]; then
+          if [ -z "${GH_PAT:-}" ]; then
             python3 - << 'EOF'
           import os
           import re
@@ -129,15 +128,13 @@ jobs:
             exit 0
           fi
 
-          echo "$GITHUB_PAT" | gh auth login --with-token
-
           download_ok=false
           download_error=""
           for delay in 0 10 20 30; do
             if [ "$delay" -gt 0 ]; then
               sleep "$delay"
             fi
-            if gh attach download "$DOWNLOAD_URL" -O issue_log.txt 2>download.err; then
+            if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue_log.txt 2>download.err; then
               download_ok=true
               download_error=""
               break
