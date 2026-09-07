@@ -1,38 +1,25 @@
 name: Manual Log Upload
-description: Upload raw connection and system logs for automated analysis.
+description: Upload a raw log file for automated analysis and formatting.
 title: "[Log Analysis]: "
 labels: ["manual-log-upload"]
 body:
   - type: markdown
     attributes:
       value: |
-        Paste your unformatted raw logs below. The automated bot will analyze the trace and generate the report table.
+        Please provide an issue description and attach your `.txt` or `.log` file below. The automated bot will download the log, run analysis, and format this issue.
   - type: textarea
     id: description
     attributes:
       label: Description
-      description: Provide context or what went wrong.
-      placeholder: e.g., Connection stalls after switching networks...
-    validations:
-      required: true
-  - type: dropdown
-    id: vpn_status
-    attributes:
-      label: VPN Status
-      description: Select the VPN state when the issue occurred.
-      options:
-        - Connected
-        - Disconnected
-        - Connecting
-        - Reasserting
-        - Unknown
+      description: Describe what happened or what went wrong.
+      placeholder: e.g., Connection dropped after 10 minutes...
     validations:
       required: true
   - type: textarea
-    id: log_content
+    id: log_file
     attributes:
-      label: Log Content
-      description: Paste the complete raw log output here.
-      render: shell
+      label: Log File Attachment
+      description: Drag and drop your `.txt` or `.log` file into the box below.
+      placeholder: Drag and drop log file here...
     validations:
       required: true
