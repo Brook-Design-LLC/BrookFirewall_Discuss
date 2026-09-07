@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Log File Splitter</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; color: #1f2328; }
+    h1 { font-size: 1.4rem; }
+    .drop { border: 2px dashed #d0d7de; border-radius: 8px; padding: 2rem; text-align: center; cursor: pointer; }
+    .drop.drag { border-color: #0969da; background: #f6f8fa; }
+    button { margin-top: 1rem; padding: 0.5rem 1rem; background: #0969da; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #status { margin-top: 1rem; white-space: pre-wrap; font-size: 0.9rem; }
+    .hint { color: #656d76; font-size: 0.85rem; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Log File Splitter</h1>
+  <p>Split large <code>.log</code> / <code>.txt</code> files into parts of <strong>10 MB</strong> or less for GitHub issue uploads. Processing runs entirely in your browser.</p>
+  <div class="drop" id="drop">
+    <p>Drag and drop a log file here, or click to choose</p>
+    <input type="file" id="file" accept=".log,.txt" hidden>
+  </div>
+  <p class="hint">Output: <code>{name}.txt.part1</code>, <code>{name}.txt.part2</code>, … Upload all parts to the issue form.</p>
+  <div id="status"></div>
+  <script>
+    const CHUNK = 10 * 1024 * 1024;
+    const drop = document.getElementById('drop');
+    const fileInput = document.getElementById('file');
+    const status = document.getElementById('status');
+
+    drop.addEventListener('click', () => fileInput.click());
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('drag'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault();
+      drop.classList.remove('drag');
+      if (e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) processFile(fileInput.files[0]);
+    });
+
+    function basename(name) {
+      const base = name.replace(/\.[^.]+$/, '');
+      return base || 'log';
+    }
+
+    function findSplitIndex(bytes, start, maxEnd) {
+      let end = Math.min(start + CHUNK, bytes.length);
+      if (end >= bytes.length) return end;
+      for (let i = end; i > start; i--) {
+        if (bytes[i - 1] === 0x0a) return i;
+      }
+      for (let i = end; i > start; i--) {
+        if ((bytes[i] & 0xc0) !== 0x80) return i;
+      }
+      return end;
+    }
+
+    function downloadBlob(blob, filename) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    async function processFile(file) {
+      status.textContent = 'Reading file…';
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const prefix = basename(file.name);
+      let start = 0;
+      let part = 1;
+      const parts = [];
+
+      while (start < bytes.length) {
+        const end = findSplitIndex(bytes, start, start + CHUNK);
+        const slice = bytes.slice(start, end);
+        const name = `${prefix}.txt.part${part}`;
+        parts.push({ name, size: slice.length });
+        downloadBlob(new Blob([slice], { type: 'text/plain' }), name);
+        start = end;
+        part++;
+      }
+
+      if (parts.length === 1 && file.size <= CHUNK) {
+        status.textContent = `File is already ≤ 10 MB (${formatSize(file.size)}). No split needed.`;
+        return;
+      }
+
+      status.textContent = `Split into ${parts.length} part(s):\n` +
+        parts.map((p) => `  ${p.name} — ${formatSize(p.size)}`).join('\n') +
+        '\n\nDownloads started. Upload every part to the issue form.';
+    }
+
+    function formatSize(n) {
+      if (n < 1024) return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+    }
+  </script>
+</body>
+</html>

@@ -66,28 +66,64 @@ jobs:
               return urls
 
           def is_log_url(url: str) -> bool:
-              return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
+              return bool(re.search(r"\.(log|txt)(\.part\d+)?(\?|$)", url, re.I))
+
+          def is_whole_log(url: str) -> bool:
+              return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I)) and not re.search(
+                  r"\.part\d+(\?|$)", url, re.I
+              )
+
+          def part_number(url: str) -> int | None:
+              match = re.search(r"\.part(\d+)(\?|$)", url, re.I)
+              return int(match.group(1)) if match else None
+
+          def log_group_key(url: str) -> str:
+              name = url.rsplit("/", 1)[-1].split("?")[0]
+              return re.sub(r"\.(log|txt)(\.part\d+)?$", "", name, flags=re.I)
+
+          import json
 
           log_field = extract_field("Log File Attachment", body)
           all_urls = find_all_attachment_urls(log_field)
           log_urls = [u for u in all_urls if is_log_url(u)]
-          if len(log_urls) > 1:
-              print("MULTIPLE")
-          elif len(log_urls) == 0:
-              print("NONE")
+          whole_logs = [u for u in log_urls if is_whole_log(u)]
+          part_logs = [u for u in log_urls if part_number(u) is not None]
+
+          if whole_logs and part_logs:
+              print("MULTIPLE:mix")
+          elif len(whole_logs) > 1:
+              print("MULTIPLE:whole")
+          elif len(whole_logs) == 1:
+              print(f"OK:{whole_logs[0]}")
+          elif part_logs:
+              groups: dict[str, list[str]] = {}
+              for url in part_logs:
+                  groups.setdefault(log_group_key(url), []).append(url)
+              if len(groups) > 1:
+                  print("MULTIPLE:parts")
+              else:
+                  urls_sorted = sorted(next(iter(groups.values())), key=lambda u: part_number(u))
+                  nums = [part_number(u) for u in urls_sorted]
+                  expected = list(range(1, len(nums) + 1))
+                  if nums != expected:
+                      print(f"MULTIPLE:incomplete:{','.join(str(n) for n in nums)}")
+                  else:
+                      print("PARTS:" + json.dumps(urls_sorted))
           else:
-              print(f"OK:{log_urls[0]}")
+              print("NONE")
           PY
           )"
 
-          if [ "$URL_RESULT" = "MULTIPLE" ]; then
-            python3 - << 'EOF'
+          if [[ "$URL_RESULT" == MULTIPLE:* ]]; then
+            MULTIPLE_REASON="${URL_RESULT#MULTIPLE:}"
+            MULTIPLE_REASON="$MULTIPLE_REASON" python3 - << 'EOF'
           import os
           import re
           import subprocess
 
           issue_number = os.environ["ISSUE_NUMBER"]
           repository = os.environ["REPOSITORY"]
+          reason = os.environ.get("MULTIPLE_REASON", "")
           with open("issue_body.md", encoding="utf-8") as f:
               issue_body = f.read()
 
@@ -97,12 +133,20 @@ jobs:
               return match.group(1).strip() if match else ""
 
           desc = extract_field("Description", issue_body)
-          error_body = (
-              f"{desc}\n\n"
-              f"> [!WARNING]\n"
-              f"> **Multiple log files detected.** Please upload exactly one `.txt` or `.log` file "
-              f"> in the Log File Attachment field."
-          )
+          if reason == "incomplete" or reason.startswith("incomplete:"):
+              nums = reason.split(":", 1)[1] if ":" in reason else "?"
+              detail = (
+                  f"> **Incomplete split log series.** Found parts: {nums}. "
+                  f"> Upload all consecutive `.txt.partN` files (part1, part2, …) from the same split."
+              )
+          elif reason == "mix":
+              detail = "> **Mixed log uploads.** Upload either one whole log file or a split part series, not both."
+          elif reason == "parts":
+              detail = "> **Multiple split log series detected.** Only one log (or one split series) is allowed."
+          else:
+              detail = "> **Multiple log files detected.** Upload one `.txt`/`.log` file or one split part series."
+
+          error_body = f"{desc}\n\n> [!WARNING]\n{detail}"
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
               f.write(error_body)
           subprocess.run(
@@ -114,11 +158,16 @@ jobs:
           fi
 
           DOWNLOAD_URL=""
+          LOG_URLS_JSON="[]"
           if [[ "$URL_RESULT" == OK:* ]]; then
             DOWNLOAD_URL="${URL_RESULT#OK:}"
+            LOG_URLS_JSON="$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1]]))' "$DOWNLOAD_URL")"
+          elif [[ "$URL_RESULT" == PARTS:* ]]; then
+            LOG_URLS_JSON="${URL_RESULT#PARTS:}"
+            DOWNLOAD_URL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])[0])' "$LOG_URLS_JSON")"
           fi
 
-          if [ -z "$DOWNLOAD_URL" ]; then
+          if [ -z "$DOWNLOAD_URL" ] && [ "$LOG_URLS_JSON" = "[]" ]; then
             python3 - << 'EOF'
           import os
           import re
@@ -185,17 +234,63 @@ jobs:
 
           download_ok=false
           download_error=""
-          for delay in 0 10 20 30; do
-            if [ "$delay" -gt 0 ]; then
-              sleep "$delay"
-            fi
-            if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue_log.txt 2>download.err; then
+          if [[ "$URL_RESULT" == PARTS:* ]]; then
+            if LOG_URLS_JSON="$LOG_URLS_JSON" python3 - << 'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import time
+
+          urls = json.loads(os.environ["LOG_URLS_JSON"])
+          gh_pat = os.environ.get("GH_PAT", "")
+          download_error = ""
+
+          for index, url in enumerate(urls, start=1):
+              out_path = f"issue_log.part{index}"
+              part_ok = False
+              for delay in (0, 10, 20, 30):
+                  if delay:
+                      time.sleep(delay)
+                  result = subprocess.run(
+                      ["gh", "attach", "download", url, "-O", out_path],
+                      env={**os.environ, "GH_TOKEN": gh_pat},
+                      capture_output=True,
+                      text=True,
+                  )
+                  if result.returncode == 0 and os.path.getsize(out_path) > 0:
+                      part_ok = True
+                      download_error = ""
+                      break
+                  download_error = (result.stderr or result.stdout or "unknown error").strip()
+              if not part_ok:
+                  with open("download.err", "w", encoding="utf-8") as err_file:
+                      err_file.write(download_error)
+                  sys.exit(1)
+
+          with open("issue_log.txt", "wb") as merged:
+              for index in range(1, len(urls) + 1):
+                  with open(f"issue_log.part{index}", "rb") as part_file:
+                      merged.write(part_file.read())
+          PY
+            then
               download_ok=true
-              download_error=""
-              break
+            else
+              download_error="$(cat download.err 2>/dev/null || echo unknown error)"
             fi
-            download_error="$(cat download.err)"
-          done
+          else
+            for delay in 0 10 20 30; do
+              if [ "$delay" -gt 0 ]; then
+                sleep "$delay"
+              fi
+              if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue_log.txt 2>download.err; then
+                download_ok=true
+                download_error=""
+                break
+              fi
+              download_error="$(cat download.err)"
+            done
+          fi
 
           if [ "$download_ok" != true ] || [ ! -s issue_log.txt ]; then
             DOWNLOAD_URL="$DOWNLOAD_URL" DOWNLOAD_ERROR="$download_error" python3 - << 'EOF'
@@ -233,7 +328,8 @@ jobs:
             exit 0
           fi
 
-          DOWNLOAD_URL="$DOWNLOAD_URL" python3 - << 'EOF'
+          LOG_URLS_JSON="$LOG_URLS_JSON" DOWNLOAD_URL="$DOWNLOAD_URL" python3 - << 'EOF'
+          import json
           import os
           import re
           import subprocess
@@ -241,6 +337,9 @@ jobs:
           issue_number = os.environ.get("ISSUE_NUMBER", "")
           repository = os.environ.get("REPOSITORY", "")
           download_url = os.environ.get("DOWNLOAD_URL", "")
+          log_urls = json.loads(os.environ.get("LOG_URLS_JSON", "[]") or "[]")
+          if not log_urls and download_url:
+              log_urls = [download_url]
 
           def gh_issue_edit(body_file: str, title: str | None = None) -> None:
               cmd = ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", body_file]
@@ -259,7 +358,7 @@ jobs:
               return match.group(1).strip() if match else ""
 
           def is_log_url(url: str) -> bool:
-              return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
+              return bool(re.search(r"\.(log|txt)(\.part\d+)?(\?|$)", url, re.I))
 
           desc = extract_field("Description", issue_body)
           log_field = extract_field("Log File Attachment", issue_body)
@@ -269,9 +368,9 @@ jobs:
               stripped = line.strip()
               if not stripped:
                   continue
-              if download_url in stripped and is_log_url(download_url):
+              if any(url in stripped and is_log_url(url) for url in log_urls):
                   continue
-              if stripped == download_url:
+              if stripped in log_urls:
                   continue
               media_lines.append(line)
           media_from_field = "\n".join(media_lines).strip()

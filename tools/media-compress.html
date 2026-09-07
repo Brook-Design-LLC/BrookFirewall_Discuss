@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Media Compressor</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; color: #1f2328; }
+    h1 { font-size: 1.4rem; }
+    .drop { border: 2px dashed #d0d7de; border-radius: 8px; padding: 2rem; text-align: center; cursor: pointer; }
+    .drop.drag { border-color: #0969da; background: #f6f8fa; }
+    #status { margin-top: 1rem; white-space: pre-wrap; font-size: 0.9rem; }
+    .hint { color: #656d76; font-size: 0.85rem; }
+    progress { width: 100%; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Media Compressor</h1>
+  <p>Compress images or videos to <strong>10 MB</strong> or less for GitHub issue uploads. Files are processed locally in your browser.</p>
+  <div class="drop" id="drop">
+    <p>Drag and drop an image or video, or click to choose</p>
+    <input type="file" id="file" accept="image/*,video/*,audio/*,.mp4,.mov,.webm,.m4a,.mp3" hidden>
+  </div>
+  <p class="hint">Images: fully offline. Video/audio: requires one-time download of ffmpeg.wasm (~30 MB).</p>
+  <progress id="progress" value="0" max="100" hidden></progress>
+  <div id="status"></div>
+  <script type="module">
+    const MAX = 10 * 1024 * 1024;
+    const drop = document.getElementById('drop');
+    const fileInput = document.getElementById('file');
+    const status = document.getElementById('status');
+    const progress = document.getElementById('progress');
+
+    drop.addEventListener('click', () => fileInput.click());
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('drag'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault();
+      drop.classList.remove('drag');
+      if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) handleFile(fileInput.files[0]);
+    });
+
+    function setStatus(msg) { status.textContent = msg; }
+    function formatSize(n) {
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+    }
+    function downloadBlob(blob, filename) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    async function compressImage(file) {
+      const img = await createImageBitmap(file);
+      let w = img.width;
+      let h = img.height;
+      let quality = 0.92;
+      let scale = 1;
+      let blob = null;
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const tw = Math.max(1, Math.round(w * scale));
+        const th = Math.max(1, Math.round(h * scale));
+        canvas.width = tw;
+        canvas.height = th;
+        ctx.drawImage(img, 0, 0, tw, th);
+        const type = file.type === 'image/png' ? 'image/jpeg' : (file.type || 'image/jpeg');
+        blob = await new Promise((r) => canvas.toBlob(r, type, quality));
+        if (!blob) throw new Error('Failed to encode image');
+        if (blob.size <= MAX) break;
+        if (quality > 0.35) quality -= 0.08;
+        else scale *= 0.85;
+      }
+      const ext = blob.type.includes('png') ? 'png' : 'jpg';
+      const outName = file.name.replace(/\.[^.]+$/, '') + `.compressed.${ext}`;
+      downloadBlob(blob, outName);
+      setStatus(`Done: ${formatSize(file.size)} → ${formatSize(blob.size)}\nSaved as ${outName}`);
+    }
+
+    async function compressWithFfmpeg(file) {
+      setStatus('Loading ffmpeg.wasm (first time only)…');
+      progress.hidden = false;
+      const { FFmpeg } = await import('https://esm.sh/@ffmpeg/ffmpeg@0.12.10?bundle');
+      const { fetchFile, toBlobURL } = await import('https://esm.sh/@ffmpeg/util@0.12.1?bundle');
+      const ffmpeg = new FFmpeg();
+      ffmpeg.on('progress', ({ progress: p }) => {
+        progress.value = Math.round((p || 0) * 100);
+      });
+      const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+      await ffmpeg.load({
+        coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
+      });
+      const inName = 'input' + (file.name.match(/\.[^.]+$/)?.[0] || '.mp4');
+      const outName = 'output.mp4';
+      await ffmpeg.writeFile(inName, await fetchFile(file));
+      let crf = 28;
+      let scale = '';
+      let outBlob = null;
+      for (let i = 0; i < 8; i++) {
+        setStatus(`Compressing (pass ${i + 1})…`);
+        const vf = scale ? `-vf ${scale}` : '';
+        await ffmpeg.exec(['-i', inName, '-c:v', 'libx264', '-crf', String(crf), '-preset', 'fast', '-c:a', 'aac', '-b:a', '128k', ...vf.split(' ').filter(Boolean), outName]);
+        const data = await ffmpeg.readFile(outName);
+        outBlob = new Blob([data.buffer], { type: 'video/mp4' });
+        if (outBlob.size <= MAX) break;
+        crf = Math.min(crf + 4, 40);
+        scale = scale ? 'scale=iw*0.75:-2' : 'scale=iw*0.85:-2';
+      }
+      progress.hidden = true;
+      if (!outBlob || outBlob.size > MAX) {
+        setStatus('Could not compress below 10 MB. Try a shorter clip or lower resolution source.');
+        return;
+      }
+      const finalName = file.name.replace(/\.[^.]+$/, '') + '.compressed.mp4';
+      downloadBlob(outBlob, finalName);
+      setStatus(`Done: ${formatSize(file.size)} → ${formatSize(outBlob.size)}\nSaved as ${finalName}`);
+    }
+
+    async function handleFile(file) {
+      try {
+        setStatus(`Processing ${file.name} (${formatSize(file.size)})…`);
+        if (file.size <= MAX) {
+          setStatus(`File is already ≤ 10 MB (${formatSize(file.size)}). No compression needed.`);
+          return;
+        }
+        if (file.type.startsWith('image/')) {
+          await compressImage(file);
+        } else if (file.type.startsWith('video/') || file.type.startsWith('audio/') || /\.(mp4|mov|webm|m4a|mp3)$/i.test(file.name)) {
+          await compressWithFfmpeg(file);
+        } else {
+          setStatus('Unsupported file type. Use an image or video file.');
+        }
+      } catch (err) {
+        progress.hidden = true;
+        setStatus(`Error: ${err.message}\nTry another file or compress manually.`);
+      }
+    }
+  </script>
+</body>
+</html>
