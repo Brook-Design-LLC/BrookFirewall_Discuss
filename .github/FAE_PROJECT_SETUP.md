@@ -26,11 +26,13 @@ In the repo → **Settings** → **Secrets and variables** → **Actions** → *
 
 `GH_PAT` is also used by the log analysis workflow for private attachment downloads.
 
+**Important:** If `GH_PAT` was created before project automation, verify it includes the **`project`** scope. A token with only `repo` can format issues but cannot add them to the FAE project. Regenerate the PAT, authorize SSO for `Brook-Design-LLC` if prompted, and update the repository secret.
+
 ## 4. How automation works
 
 1. [`analyze_log_issue.yml`](workflows/analyze_log_issue.yml) formats the issue from `.bkglog` / diagnostic `.zip` (includes Client UUID in the Info table), then dispatches `uuid_issue_history` via `GH_PAT` (GitHub does not forward `issues: edited` events from `GITHUB_TOKEN` actions).
 2. [`update_uuid_issue_history.yml`](workflows/update_uuid_issue_history.yml) runs after that dispatch:
-   - Waits ~2 minutes for GitHub search indexing
+   - Searches for related issues by Client UUID (retries if search indexing is slow)
    - Appends **User Issue History** to the issue body
    - Adds the issue to the FAE project and fills the **Client UUID** field
 
@@ -39,5 +41,5 @@ If `FAE_PROJECT_URL` or `GH_PAT` is missing, history is still written; only the 
 ## 5. Verify
 
 1. Open a test issue with a diagnostic archive that includes Client UUID
-2. After formatting, wait ~2–5 minutes for **User Issue History** at the bottom of the issue
+2. After formatting, **User Issue History** should appear at the bottom of the issue within about a minute
 3. Confirm the issue appears in the FAE project with **Client UUID** populated
