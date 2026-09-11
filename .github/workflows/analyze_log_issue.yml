@@ -11,9 +11,8 @@ jobs:
   analyze-and-format:
     if: |
       !contains(github.event.issue.body, '## Info') &&
-      (contains(github.event.issue.body, '.zip') ||
-       contains(github.event.issue.body, '.bkglog') ||
-       contains(github.event.issue.body, 'user-attachments/files/') ||
+      (contains(github.event.issue.body, '.bkglog') ||
+       contains(github.event.issue.body, '.zip') ||
        contains(github.event.issue.body, '### Log File Attachment') ||
        contains(github.event.issue.body, '### Attachments'))
     runs-on: ubuntu-latest
@@ -69,74 +68,98 @@ jobs:
                       urls.append(url)
               return urls
 
-          def is_diagnostic_archive_url(url: str) -> bool:
-              return bool(re.search(r"\.(zip|bkglog)(\?|$)", url, re.I))
-
-          def is_media_url(url: str) -> bool:
-              return bool(
-                  re.search(r"\.(png|jpe?g|gif|webp|svg|mp4|mov|webm|pdf)(\?|$)", url, re.I)
-                  or "user-attachments/assets/" in url
-                  or "user-images.githubusercontent.com" in url
+          def is_form_issue(text: str) -> bool:
+              return "### Log File Attachment" in text or (
+                  "### OS" in text and "### Device" in text
               )
+
+          def is_bkglog_url(url: str) -> bool:
+              return bool(re.search(r"\.bkglog(\?|$)", url, re.I))
+
+          def is_form_diagnostic_url(url: str) -> bool:
+              return bool(re.search(r"\.(zip|bkglog)(\?|$)", url, re.I))
 
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
 
-          def find_diagnostic_attachment_urls(text: str) -> list[str]:
+          def find_urls_by_label(text: str, label_pattern: str) -> list[str]:
               urls = find_all_attachment_urls(text)
               hits: list[str] = []
               seen: set[str] = set()
               for url in urls:
                   if url in seen:
                       continue
-                  if is_diagnostic_archive_url(url):
-                      seen.add(url)
-                      hits.append(url)
-                      continue
-                  label_pattern = rf"\[([^\]]+)\]\(\s*{re.escape(url)}\s*\)"
-                  for match in re.finditer(label_pattern, text):
-                      if re.search(r"\.(bkglog|zip)$", match.group(1), re.I):
+                  link_pattern = rf"\[([^\]]+)\]\(\s*{re.escape(url)}\s*\)"
+                  for match in re.finditer(link_pattern, text):
+                      if re.search(label_pattern, match.group(1), re.I):
                           seen.add(url)
                           hits.append(url)
                           break
               return hits
 
-          def find_single_api_attachment_url(text: str) -> str | None:
+          def find_bkglog_urls(text: str) -> list[str]:
               urls = find_all_attachment_urls(text)
-              file_urls = [
-                  u for u in urls
-                  if re.search(r"user-attachments/files/\d+/", u) and not is_media_url(u)
-              ]
-              if len(file_urls) == 1:
-                  return file_urls[0]
-              return None
+              hits: list[str] = []
+              seen: set[str] = set()
+              for url in urls:
+                  if url in seen:
+                      continue
+                  if is_bkglog_url(url):
+                      seen.add(url)
+                      hits.append(url)
+              for url in find_urls_by_label(text, r"\.bkglog$"):
+                  if url not in seen:
+                      seen.add(url)
+                      hits.append(url)
+              return hits
 
-          diagnostic_urls = find_diagnostic_attachment_urls(body)
-          if not diagnostic_urls:
-              for field in (
-                  extract_field("Log File Attachment", body),
-                  extract_field("Attachments", body),
-              ):
-                  diagnostic_urls = find_diagnostic_attachment_urls(field)
-                  if diagnostic_urls:
-                      break
-          if not diagnostic_urls:
-              api_url = find_single_api_attachment_url(body)
-              if api_url:
-                  diagnostic_urls = [api_url]
+          def find_form_diagnostic_urls(text: str) -> list[str]:
+              urls = find_all_attachment_urls(text)
+              hits: list[str] = []
+              seen: set[str] = set()
+              for url in urls:
+                  if url in seen:
+                      continue
+                  if is_form_diagnostic_url(url):
+                      seen.add(url)
+                      hits.append(url)
+              for url in find_urls_by_label(text, r"\.(bkglog|zip)$"):
+                  if url not in seen:
+                      seen.add(url)
+                      hits.append(url)
+              return hits
 
-          if diagnostic_urls:
-              if len(diagnostic_urls) > 1:
-                  print("MULTIPLE_BKGLOG")
+          if is_form_issue(body):
+              diagnostic_urls = find_form_diagnostic_urls(body)
+              if not diagnostic_urls:
+                  for field in (
+                      extract_field("Log File Attachment", body),
+                      extract_field("Attachments", body),
+                  ):
+                      diagnostic_urls = find_form_diagnostic_urls(field)
+                      if diagnostic_urls:
+                          break
+
+              if diagnostic_urls:
+                  if len(diagnostic_urls) > 1:
+                      print("MULTIPLE_BKGLOG")
+                  else:
+                      print(f"BKGLOG:{diagnostic_urls[0]}")
               else:
-                  print(f"BKGLOG:{diagnostic_urls[0]}")
+                  log_field = extract_field("Log File Attachment", body)
+                  log_urls = [u for u in find_all_attachment_urls(log_field) if is_log_url(u)]
+                  if len(log_urls) > 1:
+                      print("MULTIPLE_LOG")
+                  elif len(log_urls) == 1:
+                      print(f"OK:{log_urls[0]}")
+                  else:
+                      print("NONE")
           else:
-              log_field = extract_field("Log File Attachment", body)
-              log_urls = [u for u in find_all_attachment_urls(log_field) if is_log_url(u)]
-              if len(log_urls) > 1:
-                  print("MULTIPLE_LOG")
-              elif len(log_urls) == 1:
-                  print(f"OK:{log_urls[0]}")
+              bkglog_urls = find_bkglog_urls(body)
+              if len(bkglog_urls) > 1:
+                  print("MULTIPLE_BKGLOG")
+              elif len(bkglog_urls) == 1:
+                  print(f"BKGLOG:{bkglog_urls[0]}")
               else:
                   print("NONE")
           PY
@@ -182,7 +205,21 @@ jobs:
           fi
 
           if [[ "$URL_RESULT" == "NONE" ]]; then
-            write_warning_issue "> **No log file attachment detected.** Please edit this issue and upload a `.bkglog`, a diagnostic `.zip` (containing `.bkglog`), `.txt`, or `.log` file."
+            NONE_REASON="$(python3 - << 'PY'
+          import pathlib
+          body = pathlib.Path("issue_body.md").read_text(encoding="utf-8")
+          is_form = "### Log File Attachment" in body or ("### OS" in body and "### Device" in body)
+          if is_form:
+              print("form")
+          else:
+              print("api")
+          PY
+          )"
+            if [[ "$NONE_REASON" == "api" ]]; then
+              write_warning_issue "> **No .bkglog attachment detected.** API-created issues must include exactly one `.bkglog` file URL."
+            else
+              write_warning_issue "> **No log file attachment detected.** Please edit this issue and upload a `.bkglog`, a diagnostic `.zip` (containing `.bkglog`), `.txt`, or `.log` file."
+            fi
             exit 0
           fi
 

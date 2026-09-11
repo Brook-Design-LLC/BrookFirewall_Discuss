@@ -60,7 +60,7 @@ body:
       label: Attachments
       description: |
         Optional screenshots, videos, or log files. Each file must be 10 MB or smaller.
-        Upload a `.bkglog` diagnostic export (app/API) or a `.zip` containing a `.bkglog` file for automated analysis.
+        Upload a `.zip` containing a `.bkglog` file for automated analysis. (App/API issues should attach `.bkglog` directly.)
     validations:
       required: false
       accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm,.log,.txt,.zip"
