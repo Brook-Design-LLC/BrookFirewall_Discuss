@@ -36,7 +36,7 @@ In the repo → **Settings** → **Secrets and variables** → **Actions** → *
    - Searches for related issues by Client UUID (retries if search indexing is slow)
    - Appends **User Issue History** to the issue body
    - Adds the issue to the FAE project and fills the **Client UUID** field (via `GITHUB_TOKEN`, so timeline shows `github-actions[bot]`)
-   - Posts an issue comment @mentioning each `fae` team member so GitHub can email them (one notification per issue)
+   - Posts an issue comment with the issue title, `## Description` text, and @mentions for each `fae` team member (one notification per issue)
 
 If `FAE_PROJECT_URL` is missing, history is still written; only the project step is skipped.
 

@@ -300,14 +300,42 @@ jobs:
           export TEAM_TOKEN
 
           python3 - << 'PY'
+          import json
           import os
+          import re
           import subprocess
-          import sys
 
           org = os.environ["ORG"]
+          repository = os.environ["REPOSITORY"]
+          issue_number = os.environ["ISSUE_NUMBER"]
           team_slug = os.environ["TEAM_SLUG"]
           team_token = os.environ.get("TEAM_TOKEN", "")
           marker = "<!-- fae-project-notified -->"
+
+          issue_result = subprocess.run(
+              [
+                  "gh",
+                  "api",
+                  f"repos/{repository}/issues/{issue_number}",
+                  "--jq",
+                  "{title,body}",
+              ],
+              capture_output=True,
+              text=True,
+              check=True,
+          )
+          issue = json.loads(issue_result.stdout)
+          title = issue.get("title", "").strip()
+          issue_body = issue.get("body", "") or ""
+
+          description = ""
+          desc_match = re.search(
+              r"## Description\s*\n\n(.*?)(?=\n##|\n<details>|\n---|\Z)",
+              issue_body,
+              re.DOTALL,
+          )
+          if desc_match:
+              description = desc_match.group(1).strip()
 
           members: list[str] = []
           if team_token:
@@ -329,16 +357,14 @@ jobs:
 
           if members:
               mentions = " ".join(f"@{login}" for login in members)
-              body = f"{mentions} 新的用戶報告已加入 FAE Support project。\n\n{marker}\n"
           else:
-              body = (
-                  f"@{org}/{team_slug} 新的用戶報告已加入 FAE Support project。\n\n"
-                  f"{marker}\n"
-              )
+              mentions = f"@{org}/{team_slug}"
               print(
                   "::warning::Could not list FAE team members; "
                   "falling back to team mention (may not notify)."
               )
+
+          body = f"{title}\n{description}\n{mentions}\n\n{marker}\n"
 
           with open("notify_comment.md", "w", encoding="utf-8") as out_file:
               out_file.write(body)
