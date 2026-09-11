@@ -322,6 +322,7 @@ jobs:
             fi
 
             DOWNLOAD_URL="$DOWNLOAD_URL" python3 - << 'EOF'
+          import json
           import os
           import re
           import subprocess
@@ -373,6 +374,12 @@ jobs:
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
 
+          def format_config_json(config_text: str) -> str:
+              try:
+                  return json.dumps(json.loads(config_text), indent=2, ensure_ascii=False)
+              except json.JSONDecodeError:
+                  return config_text
+
           def truncate_config(config_text: str) -> tuple[str, bool]:
               if len(config_text) <= max_chars:
                   return config_text, False
@@ -422,7 +429,7 @@ jobs:
                   media_lines.append(line)
           media = "\n".join(media_lines).strip()
 
-          config_body, config_truncated = truncate_config(config_text)
+          config_body, config_truncated = truncate_config(format_config_json(config_text))
           log_body, log_truncated = truncate_log(log_text)
           config_note = "> Config truncated to 60000 chars.\n\n" if config_truncated else ""
           log_note = "> Log truncated to last 100 lines / 60000 chars.\n\n" if log_truncated else ""
@@ -449,10 +456,9 @@ jobs:
           body_parts.append(f"---\n**Attached Log File:** [Download Log File]({download_url})")
 
           formatted_body = "\n\n".join(body_parts)
-          cleaned_body = "\n".join([line.strip() for line in formatted_body.splitlines()])
 
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
-              f.write(cleaned_body)
+              f.write(formatted_body)
 
           title_result = subprocess.run(
               ["gh", "api", f"repos/{repository}/issues/{issue_number}", "--jq", ".title"],
