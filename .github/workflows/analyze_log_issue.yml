@@ -11,8 +11,8 @@ jobs:
   analyze-and-format:
     if: |
       !contains(github.event.issue.body, '## Info') &&
-      (contains(github.event.issue.body, '.bkglog') ||
-       contains(github.event.issue.body, '.tar.gz') ||
+      (contains(github.event.issue.body, '.zip') ||
+       contains(github.event.issue.body, '.bkglog') ||
        contains(github.event.issue.body, '### Log File Attachment'))
     runs-on: ubuntu-latest
     steps:
@@ -67,14 +67,14 @@ jobs:
                       urls.append(url)
               return urls
 
-          def is_bkglog_url(url: str) -> bool:
-              return bool(re.search(r"\.(bkglog|tar\.gz|gz|zip)(\?|$)", url, re.I))
+          def is_diagnostic_archive_url(url: str) -> bool:
+              return bool(re.search(r"\.(zip|bkglog)(\?|$)", url, re.I))
 
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
 
           all_urls = find_all_attachment_urls(body)
-          bkglog_urls = [u for u in all_urls if is_bkglog_url(u)]
+          bkglog_urls = [u for u in all_urls if is_diagnostic_archive_url(u)]
 
           if bkglog_urls:
               if len(bkglog_urls) > 1:
@@ -123,17 +123,17 @@ jobs:
           }
 
           if [[ "$URL_RESULT" == "MULTIPLE_BKGLOG" ]]; then
-            write_warning_issue "> **Multiple .bkglog files detected.** Upload only one `.bkglog` file per issue."
+            write_warning_issue "> **Multiple diagnostic archives detected.** Upload only one `.zip` or `.bkglog` file per issue."
             exit 0
           fi
 
           if [[ "$URL_RESULT" == "MULTIPLE_LOG" ]]; then
-            write_warning_issue "> **Multiple log files detected.** Upload one `.txt`/`.log` file or one `.bkglog` file."
+            write_warning_issue "> **Multiple log files detected.** Upload one diagnostic `.zip` or a single `.txt`/`.log` file."
             exit 0
           fi
 
           if [[ "$URL_RESULT" == "NONE" ]]; then
-            write_warning_issue "> **No log file attachment detected.** Please edit this issue and upload a valid `.bkglog`, `.txt`, or `.log` file."
+            write_warning_issue "> **No log file attachment detected.** Please edit this issue and upload a diagnostic `.zip` (containing `.bkglog`), `.bkglog`, `.txt`, or `.log` file."
             exit 0
           fi
 
@@ -151,7 +151,7 @@ jobs:
               if [ "$delay" -gt 0 ]; then
                 sleep "$delay"
               fi
-              if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue.bkglog 2>download.err; then
+              if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue.archive 2>download.err; then
                 download_ok=true
                 download_error=""
                 break
@@ -159,7 +159,7 @@ jobs:
               download_error="$(cat download.err)"
             done
 
-            if [ "$download_ok" != true ] || [ ! -s issue.bkglog ]; then
+            if [ "$download_ok" != true ] || [ ! -s issue.archive ]; then
               DOWNLOAD_URL="$DOWNLOAD_URL" DOWNLOAD_ERROR="$download_error" python3 - << 'EOF'
           import os
           import re
@@ -181,7 +181,7 @@ jobs:
           error_body = (
               f"{desc}\n\n"
               f"> [!WARNING]\n"
-              f"> **Failed to download .bkglog file.** URL: `{download_url}`\n"
+              f"> **Failed to download diagnostic archive.** URL: `{download_url}`\n"
               f"> Error: {download_error}\n"
               f"> Ensure `GH_PAT` is a Classic PAT with `repo` scope and SSO authorization, then edit this issue to retry."
           )
@@ -195,32 +195,36 @@ jobs:
               exit 0
             fi
 
-            if ! python3 - << 'PY'
+            if ! DOWNLOAD_URL="$DOWNLOAD_URL" python3 - << 'PY'
           import os
+          import re
           import sys
           import tarfile
           import tempfile
           import zipfile
 
-          archive_path = "issue.bkglog"
-          out_path = "analyze.txt"
+          archive_path = "issue.archive"
+          download_url = os.environ.get("DOWNLOAD_URL", "")
+          required_files = ("analyze.txt", "config.json", "log.txt")
 
           def basename(path: str) -> str:
               return path.rsplit("/", 1)[-1]
 
-          def write_analyze(data: bytes) -> bool:
-              if not data:
-                  return False
-              with open(out_path, "wb") as out:
-                  out.write(data)
-              return True
+          def list_tar_members(path: str) -> list[str]:
+              for mode in ("r:*", "r:gz", "r:bz2", "r:xz", "r:"):
+                  try:
+                      with tarfile.open(path, mode) as tar:
+                          return [m.name for m in tar.getmembers() if m.isfile()]
+                  except (tarfile.TarError, OSError):
+                      continue
+              return []
 
-          def find_analyze_in_tar(path: str) -> bytes | None:
+          def read_tar_member(path: str, filename: str) -> bytes | None:
               for mode in ("r:*", "r:gz", "r:bz2", "r:xz", "r:"):
                   try:
                       with tarfile.open(path, mode) as tar:
                           for member in tar.getmembers():
-                              if member.isfile() and basename(member.name) == "analyze.txt":
+                              if member.isfile() and basename(member.name) == filename:
                                   extracted = tar.extractfile(member)
                                   if extracted:
                                       return extracted.read()
@@ -228,73 +232,82 @@ jobs:
                       continue
               return None
 
-          def find_analyze_in_zip(path: str) -> bytes | None:
+          def extract_bkglog_files(bkglog_path: str) -> dict[str, str]:
+              members = list_tar_members(bkglog_path)
+              files: dict[str, str] = {}
+              for filename in required_files:
+                  data = read_tar_member(bkglog_path, filename)
+                  if data is None:
+                      raise ValueError(
+                          f"missing {filename} in .bkglog; found: {', '.join(members) or 'none'}"
+                      )
+                  files[filename] = data.decode("utf-8", errors="replace")
+              return files
+
+          def extract_bkglog_from_zip(zip_path: str) -> dict[str, str]:
+              with zipfile.ZipFile(zip_path) as zf:
+                  matches = [
+                      name for name in zf.namelist()
+                      if basename(name).lower().endswith(".bkglog")
+                  ]
+                  if not matches:
+                      raise ValueError(
+                          f"no .bkglog in zip; found: {', '.join(zf.namelist()) or 'none'}"
+                      )
+                  if len(matches) > 1:
+                      raise ValueError(f"multiple .bkglog files in zip: {', '.join(matches)}")
+                  bkglog_bytes = zf.read(matches[0])
+
+              with tempfile.NamedTemporaryFile(delete=False, suffix=".bkglog") as tmp:
+                  tmp.write(bkglog_bytes)
+                  bkglog_path = tmp.name
               try:
-                  with zipfile.ZipFile(path) as zf:
-                      for name in zf.namelist():
-                          if basename(name) == "analyze.txt":
-                              return zf.read(name)
+                  return extract_bkglog_files(bkglog_path)
+              finally:
+                  os.unlink(bkglog_path)
 
-                      for name in zf.namelist():
-                          lower = basename(name).lower()
-                          if lower.endswith((".bkglog", ".tar.gz", ".tgz", ".gz")):
-                              nested = zf.read(name)
-                              with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                                  tmp.write(nested)
-                                  nested_path = tmp.name
-                              try:
-                                  found = find_analyze_in_tar(nested_path)
-                                  if found:
-                                      return found
-                              finally:
-                                  os.unlink(nested_path)
-              except (zipfile.BadZipFile, OSError):
-                  return None
-              return None
+          def extract_diagnostic_bundle(path: str, url: str) -> dict[str, str]:
+              if re.search(r"\.zip(\?|$)", url, re.I):
+                  return extract_bkglog_from_zip(path)
+              if re.search(r"\.bkglog(\?|$)", url, re.I):
+                  return extract_bkglog_files(path)
+              try:
+                  return extract_bkglog_from_zip(path)
+              except (ValueError, zipfile.BadZipFile, OSError):
+                  return extract_bkglog_files(path)
 
-          data = find_analyze_in_tar(archive_path)
-          if data is None:
-              data = find_analyze_in_zip(archive_path)
-
-          if not write_analyze(data or b""):
+          try:
+              bundle = extract_diagnostic_bundle(archive_path, download_url)
+          except (ValueError, zipfile.BadZipFile, tarfile.TarError, OSError) as exc:
               with open("extract.err", "w", encoding="utf-8") as err:
-                  err.write("analyze.txt not found in archive")
+                  err.write(str(exc))
               sys.exit(1)
+
+          for filename, key in (
+              ("analyze.txt", "analyze"),
+              ("config.json", "config"),
+              ("log.txt", "log"),
+          ):
+              content = bundle[filename].strip()
+              if not content:
+                  with open("extract.err", "w", encoding="utf-8") as err:
+                      err.write(f"{filename} is empty in diagnostic archive")
+                  sys.exit(1)
+              with open(filename, "w", encoding="utf-8") as out:
+                  out.write(bundle[filename])
           PY
             then
               if [ -f extract.err ]; then
-                archive_listing="$(python3 - << 'PY'
-          import tarfile
-          import zipfile
-
-          path = "issue.bkglog"
-          lines = []
-          try:
-              with tarfile.open(path, "r:*") as tar:
-                  lines = [m.name for m in tar.getmembers() if m.isfile()]
-          except (tarfile.TarError, OSError):
-              pass
-          if not lines:
-              try:
-                  with zipfile.ZipFile(path) as zf:
-                      lines = zf.namelist()
-              except (zipfile.BadZipFile, OSError):
-                  pass
-          if lines:
-              print(", ".join(lines[:10]))
-          else:
-              print("unable to list archive contents")
-          PY
-          )"
-                write_warning_issue "> **Failed to extract analyze.txt from diagnostic archive.** Ensure the file is a valid BrookFirewall export. Archive entries: ${archive_listing}"
+              EXTRACT_ERROR="$(cat extract.err)"
+                write_warning_issue "> **Failed to extract diagnostic archive.** ${EXTRACT_ERROR}"
               else
-                write_warning_issue "> **Failed to extract analyze.txt from diagnostic archive.** Ensure the file is a valid BrookFirewall export."
+                write_warning_issue "> **Failed to extract diagnostic archive.** Ensure the file is a valid BrookFirewall export."
               fi
               exit 0
             fi
 
-            if [ ! -s analyze.txt ]; then
-              write_warning_issue "> **analyze.txt is missing or empty in diagnostic archive.** Ensure the archive was exported from BrookFirewall."
+            if [ ! -s analyze.txt ] || [ ! -s config.json ] || [ ! -s log.txt ]; then
+              write_warning_issue "> **Diagnostic archive is missing analyze.txt, config.json, or log.txt.** Ensure the file was exported from BrookFirewall."
               exit 0
             fi
 
@@ -306,6 +319,8 @@ jobs:
           issue_number = os.environ.get("ISSUE_NUMBER", "")
           repository = os.environ.get("REPOSITORY", "")
           download_url = os.environ.get("DOWNLOAD_URL", "")
+          max_chars = 60000
+          log_lines = 100
 
           def gh_issue_edit(body_file: str, title: str | None = None) -> None:
               cmd = ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", body_file]
@@ -342,16 +357,35 @@ jobs:
                       urls.append(url)
               return urls
 
-          def is_bkglog_url(url: str) -> bool:
-              return bool(re.search(r"\.(bkglog|tar\.gz|gz|zip)(\?|$)", url, re.I))
+          def is_diagnostic_archive_url(url: str) -> bool:
+              return bool(re.search(r"\.(zip|bkglog)(\?|$)", url, re.I))
 
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
+
+          def truncate_config(config_text: str) -> tuple[str, bool]:
+              if len(config_text) <= max_chars:
+                  return config_text, False
+              return config_text[:max_chars], True
+
+          def truncate_log(log_text: str) -> tuple[str, bool]:
+              lines = log_text.splitlines()
+              truncated = len(lines) > log_lines
+              tail = lines[-log_lines:]
+              text = "\n".join(tail)
+              if len(text) > max_chars:
+                  text = text[-max_chars:]
+                  truncated = True
+              return text, truncated
 
           with open("issue_body.md", encoding="utf-8") as f:
               issue_body = f.read()
           with open("analyze.txt", encoding="utf-8", errors="replace") as f:
               analyze_md = f.read().strip()
+          with open("config.json", encoding="utf-8", errors="replace") as f:
+              config_text = f.read().strip()
+          with open("log.txt", encoding="utf-8", errors="replace") as f:
+              log_text = f.read().strip()
 
           desc = extract_field("Description", issue_body)
           attachment_fields = [
@@ -360,7 +394,10 @@ jobs:
               extract_field("Screenshots / Videos", issue_body),
           ]
           excluded_urls = {download_url}
-          excluded_urls.update(u for u in find_all_attachment_urls(issue_body) if is_bkglog_url(u) or is_log_url(u))
+          excluded_urls.update(
+              u for u in find_all_attachment_urls(issue_body)
+              if is_diagnostic_archive_url(u) or is_log_url(u)
+          )
 
           media_lines = []
           for field in attachment_fields:
@@ -375,11 +412,30 @@ jobs:
                   media_lines.append(line)
           media = "\n".join(media_lines).strip()
 
+          config_body, config_truncated = truncate_config(config_text)
+          log_body, log_truncated = truncate_log(log_text)
+          config_note = "> Config truncated to 60000 chars.\n\n" if config_truncated else ""
+          log_note = "> Log truncated to last 100 lines / 60000 chars.\n\n" if log_truncated else ""
+
           body_parts = [analyze_md]
           if desc and "## Description" not in analyze_md:
               body_parts.append(f"## Description\n\n{desc}")
           if media and "## Screenshots / Videos" not in analyze_md:
               body_parts.append(f"## Screenshots / Videos\n\n{media}")
+          body_parts.append(
+              "<details>\n"
+              "<summary>Config</summary>\n\n"
+              f"{config_note}"
+              f"```json\n{config_body}\n```\n"
+              "</details>"
+          )
+          body_parts.append(
+              "<details>\n"
+              "<summary>Log (last 100 lines)</summary>\n\n"
+              f"{log_note}"
+              f"```\n{log_body}\n```\n"
+              "</details>"
+          )
           body_parts.append(f"---\n**Attached Log File:** [Download Log File]({download_url})")
 
           formatted_body = "\n\n".join(body_parts)

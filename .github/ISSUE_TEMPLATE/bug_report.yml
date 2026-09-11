@@ -60,7 +60,7 @@ body:
       label: Attachments
       description: |
         Optional screenshots, videos, or log files. Each file must be 10 MB or smaller.
-        Upload a BrookFirewall diagnostic export renamed to `.gz` for automated analysis, or use Brook Media Compressor for large media.
+        Upload a BrookFirewall diagnostic `.zip` containing a `.bkglog` file for automated analysis.
     validations:
       required: false
-      accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm,.log,.txt,.gz"
+      accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm,.log,.txt,.zip"
