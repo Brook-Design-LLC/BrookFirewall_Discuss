@@ -12,6 +12,7 @@ jobs:
     if: |
       !contains(github.event.issue.body, '## Info') &&
       (contains(github.event.issue.body, '.bkglog') ||
+       contains(github.event.issue.body, '.tar.gz') ||
        contains(github.event.issue.body, '### Log File Attachment'))
     runs-on: ubuntu-latest
     steps:
@@ -67,7 +68,7 @@ jobs:
               return urls
 
           def is_bkglog_url(url: str) -> bool:
-              return bool(re.search(r"\.bkglog(\?|$)", url, re.I))
+              return bool(re.search(r"\.(bkglog|tar\.gz)(\?|$)", url, re.I))
 
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
@@ -249,7 +250,7 @@ jobs:
               return urls
 
           def is_bkglog_url(url: str) -> bool:
-              return bool(re.search(r"\.bkglog(\?|$)", url, re.I))
+              return bool(re.search(r"\.(bkglog|tar\.gz)(\?|$)", url, re.I))
 
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
