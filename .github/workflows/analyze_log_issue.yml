@@ -34,10 +34,13 @@ jobs:
           gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}" --jq .body > issue_body.md
 
           cat > workflow_common.py << 'PY'
+          import base64
+          import json
           import os
           import re
           import subprocess
           import sys
+          from urllib.parse import quote
 
           WORKFLOW_ERROR_MARKER = "## Workflow Error"
 
@@ -52,6 +55,81 @@ jobs:
               return f"{body}{marker_block}> [!WARNING]\n{detail}"
 
 
+          def gh_api_run(args: list[str], env: dict[str, str], text: bool = False) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+              result = subprocess.run(
+                  ["gh", "api", *args],
+                  env=env,
+                  capture_output=True,
+                  text=text,
+              )
+              return result
+
+
+          def gh_api_error(result: subprocess.CompletedProcess) -> str:
+              message = (result.stderr or result.stdout or "gh api failed").strip()
+              if len(message) > 1000:
+                  message = message[:1000] + "..."
+              return message
+
+
+          def download_repo_contents(
+              owner: str, repo: str, ref: str, path: str, output: str, env: dict[str, str]
+          ) -> str:
+              encoded_path = "/".join(quote(part, safe="") for part in path.split("/"))
+              endpoint = f"repos/{owner}/{repo}/contents/{encoded_path}?ref={quote(ref, safe='')}"
+
+              raw_result = gh_api_run(
+                  ["-H", "Accept: application/vnd.github.raw+json", endpoint],
+                  env,
+                  text=False,
+              )
+              if raw_result.returncode == 0 and raw_result.stdout:
+                  with open(output, "wb") as out_file:
+                      out_file.write(raw_result.stdout)
+                  return "gh_api_raw"
+
+              json_result = gh_api_run([endpoint], env, text=True)
+              if json_result.returncode == 0 and json_result.stdout:
+                  data = json.loads(json_result.stdout)
+                  content = data.get("content", "")
+                  if data.get("encoding") == "base64" and content:
+                      decoded = base64.b64decode(content)
+                      if not decoded:
+                          raise ValueError("gh api returned empty base64 file content")
+                      with open(output, "wb") as out_file:
+                          out_file.write(decoded)
+                      return "gh_api_base64"
+
+                  download_url = data.get("download_url")
+                  if download_url:
+                      curl_result = subprocess.run(
+                          [
+                              "curl",
+                              "-fsSL",
+                              "-H",
+                              f"Authorization: Bearer {env['GH_TOKEN']}",
+                              "-o",
+                              output,
+                              download_url,
+                          ],
+                          capture_output=True,
+                          text=True,
+                      )
+                      if curl_result.returncode == 0 and os.path.getsize(output) > 0:
+                          return "gh_api_download_url"
+                      errors = [f"download_url curl: {(curl_result.stderr or curl_result.stdout or 'failed').strip()}"]
+                  else:
+                      errors = ["contents JSON missing base64 content and download_url"]
+              else:
+                  errors = []
+
+              if raw_result.returncode != 0:
+                  errors.append(f"contents raw: {gh_api_error(raw_result)}")
+              if json_result.returncode != 0:
+                  errors.append(f"contents JSON: {gh_api_error(json_result)}")
+              raise ValueError("; ".join(errors) or "gh api contents download failed")
+
+
           def download_attachment(url: str, output: str, gh_pat: str) -> str:
               if not gh_pat:
                   raise ValueError("GH_PAT is required for private repo download")
@@ -63,30 +141,17 @@ jobs:
               )
               if match:
                   owner, repo, ref, path = match.groups()
-                  result = subprocess.run(
-                      [
-                          "gh",
-                          "api",
-                          "-H",
-                          "Accept: application/vnd.github.raw+json",
-                          f"repos/{owner}/{repo}/contents/{path}?ref={ref}",
-                      ],
-                      env=env,
-                      capture_output=True,
-                      check=True,
-                  )
-                  with open(output, "wb") as out_file:
-                      out_file.write(result.stdout)
-                  if not result.stdout:
-                      raise ValueError("gh api returned empty file content")
-                  return "gh_api_contents"
+                  return download_repo_contents(owner, repo, ref, path, output, env)
 
               if re.search(r"github\.com/user-attachments/", url) or "user-images.githubusercontent.com" in url:
-                  subprocess.run(
+                  result = subprocess.run(
                       ["gh", "attach", "download", url, "-O", output],
                       env=env,
-                      check=True,
+                      capture_output=True,
+                      text=True,
                   )
+                  if result.returncode != 0:
+                      raise ValueError(gh_api_error(result))
                   if not os.path.getsize(output):
                       raise ValueError("gh attach downloaded empty file")
                   return "gh_attach"
@@ -134,26 +199,31 @@ jobs:
               if "/raw/refs/heads/" in download_url:
                   detail += (
                       "\n> For attachments-repo URLs, ensure `GH_PAT` can read "
-                      "`Brook-Design-LLC/BrookFirewall_Discuss_Attachments`."
+                      "`Brook-Design-LLC/BrookFirewall_Discuss_Attachments` "
+                      "and that SSO is authorized for the `Brook-Design-LLC` org."
                   )
               write_error(detail)
 
 
           if __name__ == "__main__":
               command = sys.argv[1]
-              if command == "write_error":
-                  write_error(os.environ["DETAIL"])
-              elif command == "download":
-                  method = download_attachment(
-                      os.environ["DOWNLOAD_URL"],
-                      sys.argv[2],
-                      os.environ["GH_PAT"],
-                  )
-                  print(method)
-              elif command == "write_download_error":
-                  write_download_error(sys.argv[2])
-              else:
-                  raise ValueError(f"Unknown command: {command}")
+              try:
+                  if command == "write_error":
+                      write_error(os.environ["DETAIL"])
+                  elif command == "download":
+                      method = download_attachment(
+                          os.environ["DOWNLOAD_URL"],
+                          sys.argv[2],
+                          os.environ["GH_PAT"],
+                      )
+                      print(method)
+                  elif command == "write_download_error":
+                      write_download_error(sys.argv[2])
+                  else:
+                      raise ValueError(f"Unknown command: {command}")
+              except Exception as exc:
+                  print(str(exc), file=sys.stderr)
+                  sys.exit(1)
           PY
 
           URL_RESULT="$(python3 - << 'PY'
