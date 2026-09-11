@@ -36,11 +36,24 @@ In the repo → **Settings** → **Secrets and variables** → **Actions** → *
    - Searches for related issues by Client UUID (retries if search indexing is slow)
    - Appends **User Issue History** to the issue body
    - Adds the issue to the FAE project and fills the **Client UUID** field
+   - Posts an issue comment mentioning `@Brook-Design-LLC/fae` so GitHub can email team members (one notification per issue)
 
 If `FAE_PROJECT_URL` or `GH_PAT` is missing, history is still written; only the project step is skipped.
 
-## 5. Verify
+## 5. FAE email notifications
+
+Automation uses a **team @mention** in an issue comment. GitHub forwards email based on each member's notification settings. This does **not** use `read:email` to send custom mail.
+
+FAE members should enable email notifications in GitHub → **Settings** → **Notifications**, including:
+
+- Email for **Participating** or **Watching** threads
+- Notifications for **team mentions**
+
+Also confirm the org team `fae` can be @mentioned in this repository (org **Teams** → `fae` → visibility/access).
+
+## 6. Verify
 
 1. Open a test issue with a diagnostic archive that includes Client UUID
 2. After formatting, **User Issue History** should appear at the bottom of the issue within about a minute
 3. Confirm the issue appears in the FAE project with **Client UUID** populated
+4. Confirm a comment mentioning `@Brook-Design-LLC/fae` was posted (only once per issue)

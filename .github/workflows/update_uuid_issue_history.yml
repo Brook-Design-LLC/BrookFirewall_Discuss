@@ -259,6 +259,68 @@ jobs:
             --field-id "${UUID_FIELD_ID}" \
             --text "${CLIENT_UUID}"; then
             echo "Added issue #${ISSUE_NUMBER} to project with Client UUID ${CLIENT_UUID}."
+            touch project_added.ok
           else
             echo "::warning::Issue #${ISSUE_NUMBER} is in the project but failed to set Client UUID field."
+          fi
+
+      - name: Notify FAE team
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FAE_PROJECT_URL: ${{ secrets.FAE_PROJECT_URL }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          REPOSITORY: ${{ github.repository }}
+          ORG: ${{ github.repository_owner }}
+        run: |
+          set +e -uo pipefail
+          export GH_REPO="${REPOSITORY}"
+
+          NOTIFY_MARKER="<!-- fae-project-notified -->"
+
+          if [ ! -f project_added.ok ] || [ ! -f client_uuid.txt ]; then
+            echo "Project was not added successfully; skipping FAE notification."
+            exit 0
+          fi
+
+          if [ -z "${FAE_PROJECT_URL:-}" ]; then
+            echo "FAE_PROJECT_URL not configured; skipping FAE notification."
+            exit 0
+          fi
+
+          if gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/comments" --paginate --jq '.[].body' 2>/dev/null \
+            | grep -q "${NOTIFY_MARKER}"; then
+            echo "FAE notification comment already exists; skipping."
+            exit 0
+          fi
+
+          CLIENT_UUID="$(cat client_uuid.txt)"
+
+          python3 - << PY
+          import os
+
+          org = os.environ["ORG"]
+          issue_number = os.environ["ISSUE_NUMBER"]
+          client_uuid = open("client_uuid.txt", encoding="utf-8").read().strip()
+          project_url = os.environ["FAE_PROJECT_URL"]
+          marker = "<!-- fae-project-notified -->"
+
+          body = (
+              f"@{org}/fae 新的用戶報告已加入 FAE Support project。\n\n"
+              "| | |\n"
+              "| --- | --- |\n"
+              f"| Issue | #{issue_number} |\n"
+              f"| Client UUID | `{client_uuid}` |\n"
+              f"| Project | [FAE Support]({project_url}) |\n\n"
+              f"{marker}\n"
+          )
+
+          with open("notify_comment.md", "w", encoding="utf-8") as out_file:
+              out_file.write(body)
+          PY
+
+          if gh issue comment "${ISSUE_NUMBER}" --repo "${REPOSITORY}" --body-file notify_comment.md; then
+            echo "Posted FAE team notification on issue #${ISSUE_NUMBER}."
+          else
+            echo "::warning::Failed to post FAE team notification on issue #${ISSUE_NUMBER}."
           fi
