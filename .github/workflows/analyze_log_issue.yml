@@ -195,19 +195,101 @@ jobs:
               exit 0
             fi
 
-            extract_ok=false
-            if [[ "$DOWNLOAD_URL" =~ \.zip(\?|$) ]]; then
-              if unzip -p issue.bkglog analyze.txt > analyze.txt 2>extract.err; then
-                extract_ok=true
-              fi
-            else
-              if tar -xzf issue.bkglog analyze.txt 2>extract.err; then
-                extract_ok=true
-              fi
-            fi
+            if ! python3 - << 'PY'
+          import os
+          import sys
+          import tarfile
+          import tempfile
+          import zipfile
 
-            if [ "$extract_ok" != true ]; then
-              write_warning_issue "> **Failed to extract analyze.txt from diagnostic archive.** Ensure the file is a valid BrookFirewall export."
+          archive_path = "issue.bkglog"
+          out_path = "analyze.txt"
+
+          def basename(path: str) -> str:
+              return path.rsplit("/", 1)[-1]
+
+          def write_analyze(data: bytes) -> bool:
+              if not data:
+                  return False
+              with open(out_path, "wb") as out:
+                  out.write(data)
+              return True
+
+          def find_analyze_in_tar(path: str) -> bytes | None:
+              for mode in ("r:*", "r:gz", "r:bz2", "r:xz", "r:"):
+                  try:
+                      with tarfile.open(path, mode) as tar:
+                          for member in tar.getmembers():
+                              if member.isfile() and basename(member.name) == "analyze.txt":
+                                  extracted = tar.extractfile(member)
+                                  if extracted:
+                                      return extracted.read()
+                  except (tarfile.TarError, OSError):
+                      continue
+              return None
+
+          def find_analyze_in_zip(path: str) -> bytes | None:
+              try:
+                  with zipfile.ZipFile(path) as zf:
+                      for name in zf.namelist():
+                          if basename(name) == "analyze.txt":
+                              return zf.read(name)
+
+                      for name in zf.namelist():
+                          lower = basename(name).lower()
+                          if lower.endswith((".bkglog", ".tar.gz", ".tgz", ".gz")):
+                              nested = zf.read(name)
+                              with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                                  tmp.write(nested)
+                                  nested_path = tmp.name
+                              try:
+                                  found = find_analyze_in_tar(nested_path)
+                                  if found:
+                                      return found
+                              finally:
+                                  os.unlink(nested_path)
+              except (zipfile.BadZipFile, OSError):
+                  return None
+              return None
+
+          data = find_analyze_in_tar(archive_path)
+          if data is None:
+              data = find_analyze_in_zip(archive_path)
+
+          if not write_analyze(data or b""):
+              with open("extract.err", "w", encoding="utf-8") as err:
+                  err.write("analyze.txt not found in archive")
+              sys.exit(1)
+          PY
+            then
+              if [ -f extract.err ]; then
+                archive_listing="$(python3 - << 'PY'
+          import tarfile
+          import zipfile
+
+          path = "issue.bkglog"
+          lines = []
+          try:
+              with tarfile.open(path, "r:*") as tar:
+                  lines = [m.name for m in tar.getmembers() if m.isfile()]
+          except (tarfile.TarError, OSError):
+              pass
+          if not lines:
+              try:
+                  with zipfile.ZipFile(path) as zf:
+                      lines = zf.namelist()
+              except (zipfile.BadZipFile, OSError):
+                  pass
+          if lines:
+              print(", ".join(lines[:10]))
+          else:
+              print("unable to list archive contents")
+          PY
+          )"
+                write_warning_issue "> **Failed to extract analyze.txt from diagnostic archive.** Ensure the file is a valid BrookFirewall export. Archive entries: ${archive_listing}"
+              else
+                write_warning_issue "> **Failed to extract analyze.txt from diagnostic archive.** Ensure the file is a valid BrookFirewall export."
+              fi
               exit 0
             fi
 
