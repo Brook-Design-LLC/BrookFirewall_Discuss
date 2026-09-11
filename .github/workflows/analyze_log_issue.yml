@@ -244,11 +244,21 @@ jobs:
                   files[filename] = data.decode("utf-8", errors="replace")
               return files
 
+          def is_real_zip_entry(name: str) -> bool:
+              parts = name.replace("\\", "/").split("/")
+              if any(part == "__MACOSX" for part in parts):
+                  return False
+              leaf = parts[-1]
+              if leaf.startswith("._") or leaf == ".DS_Store":
+                  return False
+              return True
+
           def extract_bkglog_from_zip(zip_path: str) -> dict[str, str]:
               with zipfile.ZipFile(zip_path) as zf:
                   matches = [
                       name for name in zf.namelist()
-                      if basename(name).lower().endswith(".bkglog")
+                      if is_real_zip_entry(name)
+                      and basename(name).lower().endswith(".bkglog")
                   ]
                   if not matches:
                       raise ValueError(
