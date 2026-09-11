@@ -13,7 +13,9 @@ jobs:
       !contains(github.event.issue.body, '## Info') &&
       (contains(github.event.issue.body, '.zip') ||
        contains(github.event.issue.body, '.bkglog') ||
-       contains(github.event.issue.body, '### Log File Attachment'))
+       contains(github.event.issue.body, 'user-attachments/files/') ||
+       contains(github.event.issue.body, '### Log File Attachment') ||
+       contains(github.event.issue.body, '### Attachments'))
     runs-on: ubuntu-latest
     steps:
       # sudosubin/gh-attach resolves user-attachments 302 → S3 presigned URL downloads
@@ -70,17 +72,64 @@ jobs:
           def is_diagnostic_archive_url(url: str) -> bool:
               return bool(re.search(r"\.(zip|bkglog)(\?|$)", url, re.I))
 
+          def is_media_url(url: str) -> bool:
+              return bool(
+                  re.search(r"\.(png|jpe?g|gif|webp|svg|mp4|mov|webm|pdf)(\?|$)", url, re.I)
+                  or "user-attachments/assets/" in url
+                  or "user-images.githubusercontent.com" in url
+              )
+
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
 
-          all_urls = find_all_attachment_urls(body)
-          bkglog_urls = [u for u in all_urls if is_diagnostic_archive_url(u)]
+          def find_diagnostic_attachment_urls(text: str) -> list[str]:
+              urls = find_all_attachment_urls(text)
+              hits: list[str] = []
+              seen: set[str] = set()
+              for url in urls:
+                  if url in seen:
+                      continue
+                  if is_diagnostic_archive_url(url):
+                      seen.add(url)
+                      hits.append(url)
+                      continue
+                  label_pattern = rf"\[([^\]]+)\]\(\s*{re.escape(url)}\s*\)"
+                  for match in re.finditer(label_pattern, text):
+                      if re.search(r"\.(bkglog|zip)$", match.group(1), re.I):
+                          seen.add(url)
+                          hits.append(url)
+                          break
+              return hits
 
-          if bkglog_urls:
-              if len(bkglog_urls) > 1:
+          def find_single_api_attachment_url(text: str) -> str | None:
+              urls = find_all_attachment_urls(text)
+              file_urls = [
+                  u for u in urls
+                  if re.search(r"user-attachments/files/\d+/", u) and not is_media_url(u)
+              ]
+              if len(file_urls) == 1:
+                  return file_urls[0]
+              return None
+
+          diagnostic_urls = find_diagnostic_attachment_urls(body)
+          if not diagnostic_urls:
+              for field in (
+                  extract_field("Log File Attachment", body),
+                  extract_field("Attachments", body),
+              ):
+                  diagnostic_urls = find_diagnostic_attachment_urls(field)
+                  if diagnostic_urls:
+                      break
+          if not diagnostic_urls:
+              api_url = find_single_api_attachment_url(body)
+              if api_url:
+                  diagnostic_urls = [api_url]
+
+          if diagnostic_urls:
+              if len(diagnostic_urls) > 1:
                   print("MULTIPLE_BKGLOG")
               else:
-                  print(f"BKGLOG:{bkglog_urls[0]}")
+                  print(f"BKGLOG:{diagnostic_urls[0]}")
           else:
               log_field = extract_field("Log File Attachment", body)
               log_urls = [u for u in find_all_attachment_urls(log_field) if is_log_url(u)]
@@ -133,7 +182,7 @@ jobs:
           fi
 
           if [[ "$URL_RESULT" == "NONE" ]]; then
-            write_warning_issue "> **No log file attachment detected.** Please edit this issue and upload a diagnostic `.zip` (containing `.bkglog`), `.bkglog`, `.txt`, or `.log` file."
+            write_warning_issue "> **No log file attachment detected.** Please edit this issue and upload a `.bkglog`, a diagnostic `.zip` (containing `.bkglog`), `.txt`, or `.log` file."
             exit 0
           fi
 

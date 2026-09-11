@@ -23,7 +23,7 @@ body:
     attributes:
       label: Log File Attachment
       description: |
-        Upload a BrookFirewall diagnostic `.zip` containing a `.bkglog` file (preferred), or a single `.txt`/`.log` file for analysis.
+        Upload a `.bkglog` diagnostic export (app/API), a `.zip` containing a `.bkglog` file, or a single `.txt`/`.log` file for analysis.
         You may also attach screenshots or videos in this same field.
         Each file must be 10 MB or smaller.
     validations:
