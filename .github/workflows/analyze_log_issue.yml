@@ -49,6 +49,7 @@ jobs:
               r"https://github\.com/user-attachments/files/\d+/[^\s\)\>]+",
               r"https://github\.com/[^/\s\)\>]+/[^/\s\)\>]+/files/\d+/[^\s\)\>]+",
               r"https://github\.com/[^\s\)\>]+/user-attachments/files/\d+/[^\s\)\>]+",
+              r"https://github\.com/[^/\s\)\>]+/[^/\s\)\>]+/raw/refs/heads/[^\s\)\>]+",
               r"https://(?:private-)?user-images\.githubusercontent\.com/[^\s\)\>]+",
           ]
 
@@ -194,6 +195,23 @@ jobs:
           EOF
           }
 
+          download_attachment() {
+            local url="$1" output="$2"
+            if [[ "$url" == *"user-attachments"* ]] || [[ "$url" == *"user-images.githubusercontent.com"* ]]; then
+              GH_TOKEN="$GH_PAT" gh attach download "$url" -O "$output"
+              return $?
+            fi
+            if [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/raw/refs/heads/([^/]+)/(.+)$ ]]; then
+              local owner="${BASH_REMATCH[1]}" repo="${BASH_REMATCH[2]}" ref="${BASH_REMATCH[3]}" path="${BASH_REMATCH[4]}"
+              GH_TOKEN="$GH_PAT" gh api \
+                -H "Accept: application/vnd.github.raw+json" \
+                "repos/${owner}/${repo}/contents/${path}?ref=${ref}" > "$output"
+              return $?
+            fi
+            echo "Unsupported attachment URL: $url" >&2
+            return 1
+          }
+
           if [[ "$URL_RESULT" == "MULTIPLE_BKGLOG" ]]; then
             write_warning_issue "> **Multiple diagnostic archives detected.** Upload only one `.zip` or `.bkglog` file per issue."
             exit 0
@@ -237,7 +255,7 @@ jobs:
               if [ "$delay" -gt 0 ]; then
                 sleep "$delay"
               fi
-              if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue.archive 2>download.err; then
+              if download_attachment "$DOWNLOAD_URL" issue.archive 2>download.err; then
                 download_ok=true
                 download_error=""
                 break
@@ -264,12 +282,19 @@ jobs:
               return match.group(1).strip() if match else ""
 
           desc = extract_field("Description", issue_body)
+          repo_note = ""
+          if "/raw/refs/heads/" in download_url:
+              repo_note = (
+                  "\n> For attachments-repo URLs, ensure `GH_PAT` can read "
+                  "`Brook-Design-LLC/BrookFirewall_Discuss_Attachments`."
+              )
           error_body = (
               f"{desc}\n\n"
               f"> [!WARNING]\n"
               f"> **Failed to download diagnostic archive.** URL: `{download_url}`\n"
               f"> Error: {download_error}\n"
               f"> Ensure `GH_PAT` is a Classic PAT with `repo` scope and SSO authorization, then edit this issue to retry."
+              f"{repo_note}"
           )
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
               f.write(error_body)
@@ -435,6 +460,7 @@ jobs:
               r"https://github\.com/user-attachments/files/\d+/[^\s\)\>]+",
               r"https://github\.com/[^/\s\)\>]+/[^/\s\)\>]+/files/\d+/[^\s\)\>]+",
               r"https://github\.com/[^\s\)\>]+/user-attachments/files/\d+/[^\s\)\>]+",
+              r"https://github\.com/[^/\s\)\>]+/[^/\s\)\>]+/raw/refs/heads/[^\s\)\>]+",
               r"https://(?:private-)?user-images\.githubusercontent\.com/[^\s\)\>]+",
           ]
 
@@ -571,7 +597,7 @@ jobs:
             if [ "$delay" -gt 0 ]; then
               sleep "$delay"
             fi
-            if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue_log.txt 2>download.err; then
+            if download_attachment "$DOWNLOAD_URL" issue_log.txt 2>download.err; then
               download_ok=true
               download_error=""
               break
@@ -598,12 +624,19 @@ jobs:
               return match.group(1).strip() if match else ""
 
           desc = extract_field("Description", issue_body)
+          repo_note = ""
+          if "/raw/refs/heads/" in download_url:
+              repo_note = (
+                  "\n> For attachments-repo URLs, ensure `GH_PAT` can read "
+                  "`Brook-Design-LLC/BrookFirewall_Discuss_Attachments`."
+              )
           error_body = (
               f"{desc}\n\n"
               f"> [!WARNING]\n"
               f"> **Failed to download log file.** URL: `{download_url}`\n"
               f"> Error: {download_error}\n"
               f"> Ensure `GH_PAT` is a Classic PAT with `repo` scope and SSO authorization, then edit this issue to retry."
+              f"{repo_note}"
           )
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
               f.write(error_body)
