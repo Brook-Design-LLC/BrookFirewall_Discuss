@@ -24,6 +24,7 @@ body:
       label: Log File Attachment
       description: |
         Upload a `.zip` containing a `.bkglog` file, or a single `.txt`/`.log` file for analysis. (App/API issues should attach `.bkglog` directly.)
+        Uploading a diagnostic `.zip` with `.bkglog` automatically identifies your **Client UUID** and lists your past issues.
         You may also attach screenshots or videos in this same field.
         Each file must be 10 MB or smaller.
     validations:

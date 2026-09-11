@@ -1,0 +1,339 @@
+name: Update UUID Issue History
+
+on:
+  issues:
+    types: [edited]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  update-history:
+    if: |
+      contains(github.event.issue.body, '## Info') &&
+      contains(github.event.issue.body, 'Client UUID') &&
+      !contains(github.event.issue.body, '## User Issue History')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for search index
+        run: sleep 120
+
+      - name: Search issues and append history
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          export GH_REPO="${REPOSITORY}"
+
+          python3 - << 'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import time
+
+          ISSUE_HISTORY_MARKER = "## User Issue History"
+          RETRY_DELAY_SECONDS = 60
+          MAX_RETRIES = 3
+
+
+          def extract_client_uuid(text: str) -> str | None:
+              match = re.search(r"\|\s*Client UUID\s*\|\s*([^|\n]+?)\s*\|", text, re.I)
+              if not match:
+                  return None
+              value = match.group(1).strip()
+              if not value or value.lower() in ("unknown", "n/a", "-"):
+                  return None
+              return value
+
+
+          def md_cell(value: str) -> str:
+              return value.replace("\n", " ").replace("|", "\\|").strip()
+
+
+          def format_status(state: str) -> str:
+              return "Open" if state.upper() == "OPEN" else "Closed"
+
+
+          def fetch_issue(number: int, repository: str) -> dict:
+              result = subprocess.run(
+                  [
+                      "gh",
+                      "api",
+                      f"repos/{repository}/issues/{number}",
+                      "--jq",
+                      "{number,title,state,html_url,body}",
+                  ],
+                  capture_output=True,
+                  text=True,
+                  check=True,
+              )
+              data = json.loads(result.stdout)
+              data["url"] = data.get("html_url") or f"https://github.com/{repository}/issues/{number}"
+              return data
+
+
+          def search_issues_by_uuid(uuid: str, repository: str) -> list[dict]:
+              result = subprocess.run(
+                  [
+                      "gh",
+                      "search",
+                      "issues",
+                      uuid,
+                      "--repo",
+                      repository,
+                      "--json",
+                      "number,title,state,url,body",
+                      "--limit",
+                      "100",
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+              if result.returncode != 0:
+                  raise RuntimeError((result.stderr or result.stdout or "gh search failed").strip())
+              issues = json.loads(result.stdout or "[]")
+              return [issue for issue in issues if uuid in issue.get("body", "")]
+
+
+          def collect_related_issues(
+              uuid: str, repository: str, current_number: int
+          ) -> list[dict]:
+              issues_by_number: dict[int, dict] = {}
+
+              for attempt in range(MAX_RETRIES + 1):
+                  for issue in search_issues_by_uuid(uuid, repository):
+                      issues_by_number[issue["number"]] = issue
+
+                  if current_number in issues_by_number or attempt >= MAX_RETRIES:
+                      break
+
+                  print(
+                      f"Current issue #{current_number} not indexed yet; "
+                      f"retrying in {RETRY_DELAY_SECONDS}s ({attempt + 1}/{MAX_RETRIES})"
+                  )
+                  time.sleep(RETRY_DELAY_SECONDS)
+
+              if current_number not in issues_by_number:
+                  issues_by_number[current_number] = fetch_issue(current_number, repository)
+
+              return sorted(issues_by_number.values(), key=lambda item: item["number"], reverse=True)
+
+
+          def build_history_section(uuid: str, issues: list[dict]) -> str:
+              rows = []
+              for issue in issues:
+                  rows.append(
+                      f"| [#{issue['number']}]({issue['url']}) | "
+                      f"{md_cell(issue['title'])} | {format_status(issue['state'])} |"
+                  )
+              return (
+                  f"{ISSUE_HISTORY_MARKER}\n\n"
+                  f"Client UUID: `{uuid}`\n\n"
+                  "| # | Title | Status |\n"
+                  "| --- | --- | --- |\n"
+                  + "\n".join(rows)
+              )
+
+
+          def main() -> None:
+              repository = os.environ["REPOSITORY"]
+              issue_number = int(os.environ["ISSUE_NUMBER"])
+              current_issue = fetch_issue(issue_number, repository)
+              issue_body = current_issue["body"]
+
+              uuid = extract_client_uuid(issue_body)
+              if not uuid:
+                  print("No Client UUID found in issue body; skipping.")
+                  return
+
+              print(f"Found Client UUID: {uuid}")
+              related_issues = collect_related_issues(uuid, repository, issue_number)
+              history_section = build_history_section(uuid, related_issues)
+              updated_body = issue_body.rstrip() + "\n\n" + history_section + "\n"
+
+              with open("issue_updated.md", "w", encoding="utf-8") as out_file:
+                  out_file.write(updated_body)
+
+              subprocess.run(
+                  [
+                      "gh",
+                      "issue",
+                      "edit",
+                      str(issue_number),
+                      "--repo",
+                      repository,
+                      "--body-file",
+                      "issue_updated.md",
+                  ],
+                  check=True,
+              )
+
+              with open("client_uuid.txt", "w", encoding="utf-8") as out_file:
+                  out_file.write(uuid)
+
+              print(f"Appended User Issue History with {len(related_issues)} issue(s).")
+
+
+          if __name__ == "__main__":
+              try:
+                  main()
+              except Exception as exc:
+                  print(str(exc), file=sys.stderr)
+                  sys.exit(1)
+          PY
+
+      - name: Add to FAE project
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          FAE_PROJECT_URL: ${{ secrets.FAE_PROJECT_URL }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${FAE_PROJECT_URL:-}" ] || [ -z "${GH_TOKEN:-}" ]; then
+            echo "FAE_PROJECT_URL or GH_PAT not configured; skipping project step."
+            exit 0
+          fi
+
+          if [ ! -f client_uuid.txt ]; then
+            echo "client_uuid.txt not found; skipping project step."
+            exit 0
+          fi
+
+          CLIENT_UUID="$(cat client_uuid.txt)"
+          ISSUE_NODE_ID="$(gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}" --jq .node_id)"
+
+          python3 - << 'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          project_url = os.environ["FAE_PROJECT_URL"].rstrip("/")
+          match = re.match(
+              r"https://github\.com/(orgs|users)/([^/]+)/projects/(\d+)(?:[/?#].*)?$",
+              project_url,
+          )
+          if not match:
+              print(f"::warning::Unsupported FAE_PROJECT_URL: {project_url}")
+              sys.exit(0)
+
+          owner_kind, owner_login, project_number = match.groups()
+          project_number = int(project_number)
+
+          if owner_kind == "orgs":
+              project_query = """
+              query($owner: String!, $number: Int!) {
+                organization(login: $owner) {
+                  projectV2(number: $number) {
+                    id
+                    fields(first: 50) {
+                      nodes {
+                        ... on ProjectV2Field { id name }
+                        ... on ProjectV2SingleSelectField { id name }
+                      }
+                    }
+                  }
+                }
+              }"""
+              root_key = "organization"
+          else:
+              project_query = """
+              query($owner: String!, $number: Int!) {
+                user(login: $owner) {
+                  projectV2(number: $number) {
+                    id
+                    fields(first: 50) {
+                      nodes {
+                        ... on ProjectV2Field { id name }
+                        ... on ProjectV2SingleSelectField { id name }
+                      }
+                    }
+                  }
+                }
+              }"""
+              root_key = "user"
+
+          result = subprocess.run(
+              [
+                  "gh",
+                  "api",
+                  "graphql",
+                  "-f",
+                  f"query={project_query}",
+                  "-f",
+                  f"owner={owner_login}",
+                  "-F",
+                  f"number={project_number}",
+              ],
+              capture_output=True,
+              text=True,
+              check=True,
+          )
+          data = json.loads(result.stdout)
+          project = data["data"][root_key]["projectV2"]
+          if not project:
+              print("::warning::Project not found or not accessible.")
+              sys.exit(0)
+
+          project_id = project["id"]
+          uuid_field_id = None
+          for field in project["fields"]["nodes"]:
+              if field and field.get("name") == "Client UUID":
+                  uuid_field_id = field["id"]
+                  break
+
+          with open("project_env.sh", "w", encoding="utf-8") as out_file:
+              out_file.write(f'export PROJECT_ID="{project_id}"\n')
+              if uuid_field_id:
+                  out_file.write(f'export UUID_FIELD_ID="{uuid_field_id}"\n')
+          PY
+
+          if [ ! -f project_env.sh ]; then
+            echo "Project metadata lookup did not complete; skipping."
+            exit 0
+          fi
+
+          # shellcheck disable=SC1091
+          source project_env.sh
+
+          if ! ADD_OUTPUT="$(gh api graphql -f query='
+            mutation($projectId: ID!, $contentId: ID!) {
+              addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+                item { id }
+              }
+            }' -f projectId="$PROJECT_ID" -f contentId="$ISSUE_NODE_ID" 2>&1)"; then
+            echo "::warning::Failed to add issue #${ISSUE_NUMBER} to FAE project: ${ADD_OUTPUT}"
+            exit 0
+          fi
+
+          ITEM_ID="$(echo "$ADD_OUTPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["addProjectV2ItemById"]["item"]["id"])')"
+
+          if [ -n "${UUID_FIELD_ID:-}" ]; then
+            if gh api graphql -f query='
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $uuid: String!) {
+                updateProjectV2ItemFieldValue(
+                  input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { text: $uuid }
+                  }
+                ) {
+                  projectV2Item { id }
+                }
+              }' -f projectId="$PROJECT_ID" -f itemId="$ITEM_ID" -f fieldId="$UUID_FIELD_ID" -f uuid="$CLIENT_UUID"; then
+              echo "Added issue #${ISSUE_NUMBER} to project with Client UUID ${CLIENT_UUID}."
+            else
+              echo "::warning::Added issue #${ISSUE_NUMBER} to project but failed to set Client UUID field."
+            fi
+          else
+            echo "Added issue #${ISSUE_NUMBER} to project (Client UUID field not found on project)."
+          fi
