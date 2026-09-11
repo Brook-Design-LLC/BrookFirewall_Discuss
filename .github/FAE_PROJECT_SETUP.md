@@ -12,8 +12,9 @@ One-time setup so FAE can manage support issues by **Client UUID**.
 
 1. In the project, click **+** next to existing fields
 2. Add a **Text** field named exactly: `Client UUID`
-3. Suggested table columns: **Title**, **Status**, **Client UUID**, **Assignee**
-4. Sort or filter by **Client UUID** to group issues from the same user
+3. Suggested visible columns: **Title**, **Status**, **Client UUID**, **Assignee**
+4. Hide columns this repo does not use (no pull requests): **Linked pull requests**, **Reviewers**, **Parent issue**, **Sub-issues progress** (column header menu → **Hide field**)
+5. Sort or filter by **Client UUID** to group issues from the same user
 
 ## 3. Configure repository secrets
 

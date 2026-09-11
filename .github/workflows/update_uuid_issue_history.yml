@@ -232,6 +232,9 @@ jobs:
           PROJECT_OWNER="${BASH_REMATCH[2]}"
           PROJECT_NUMBER="${BASH_REMATCH[3]}"
 
+          PROJECT_ID="$(gh project view "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --format json --jq .id 2>/dev/null)"
+          UUID_FIELD_ID="$(gh project field-list "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --format json --jq '.fields[] | select(.name == "Client UUID") | .id' 2>/dev/null | head -n 1)"
+
           ITEM_ID=""
           if ITEM_JSON="$(gh project item-add "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --url "${ISSUE_URL}" --format json 2>&1)"; then
             ITEM_ID="$(echo "${ITEM_JSON}" | jq -r '.id')"
@@ -245,7 +248,16 @@ jobs:
             exit 0
           fi
 
-          if gh project item-edit "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --id "${ITEM_ID}" --field "Client UUID" --text "${CLIENT_UUID}"; then
+          if [ -z "${UUID_FIELD_ID}" ] || [ -z "${PROJECT_ID}" ]; then
+            echo "::warning::Could not resolve project or Client UUID field metadata."
+            exit 0
+          fi
+
+          if gh project item-edit \
+            --id "${ITEM_ID}" \
+            --project-id "${PROJECT_ID}" \
+            --field-id "${UUID_FIELD_ID}" \
+            --text "${CLIENT_UUID}"; then
             echo "Added issue #${ISSUE_NUMBER} to project with Client UUID ${CLIENT_UUID}."
           else
             echo "::warning::Issue #${ISSUE_NUMBER} is in the project but failed to set Client UUID field."
