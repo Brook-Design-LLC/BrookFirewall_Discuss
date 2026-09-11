@@ -1027,3 +1027,19 @@ jobs:
 
           gh_issue_edit("issue_formatted.md", title=new_title)
           EOF
+
+      - name: Trigger UUID issue history update
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "GH_PAT not configured; skipping UUID history trigger."
+            exit 0
+          fi
+          gh api "repos/${REPOSITORY}/dispatches" \
+            -f event_type=uuid_issue_history \
+            -f "client_payload[issue_number]=${ISSUE_NUMBER}"

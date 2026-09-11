@@ -28,8 +28,8 @@ In the repo → **Settings** → **Secrets and variables** → **Actions** → *
 
 ## 4. How automation works
 
-1. [`analyze_log_issue.yml`](workflows/analyze_log_issue.yml) formats the issue from `.bkglog` / diagnostic `.zip` (includes Client UUID in the Info table).
-2. [`update_uuid_issue_history.yml`](workflows/update_uuid_issue_history.yml) runs after formatting:
+1. [`analyze_log_issue.yml`](workflows/analyze_log_issue.yml) formats the issue from `.bkglog` / diagnostic `.zip` (includes Client UUID in the Info table), then dispatches `uuid_issue_history` via `GH_PAT` (GitHub does not forward `issues: edited` events from `GITHUB_TOKEN` actions).
+2. [`update_uuid_issue_history.yml`](workflows/update_uuid_issue_history.yml) runs after that dispatch:
    - Waits ~2 minutes for GitHub search indexing
    - Appends **User Issue History** to the issue body
    - Adds the issue to the FAE project and fills the **Client UUID** field

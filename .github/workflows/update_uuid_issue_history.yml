@@ -1,6 +1,8 @@
 name: Update UUID Issue History
 
 on:
+  repository_dispatch:
+    types: [uuid_issue_history]
   issues:
     types: [edited]
 
@@ -11,18 +13,30 @@ permissions:
 jobs:
   update-history:
     if: |
-      contains(github.event.issue.body, '## Info') &&
-      contains(github.event.issue.body, 'Client UUID') &&
-      !contains(github.event.issue.body, '## User Issue History')
+      github.event_name == 'repository_dispatch' ||
+      (
+        contains(github.event.issue.body, '## Info') &&
+        contains(github.event.issue.body, 'Client UUID') &&
+        !contains(github.event.issue.body, '## User Issue History')
+      )
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve issue number
+        id: issue
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "number=${{ github.event.client_payload.issue_number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Wait for search index
         run: sleep 120
 
       - name: Search issues and append history
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -191,7 +205,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           FAE_PROJECT_URL: ${{ secrets.FAE_PROJECT_URL }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -uo pipefail
