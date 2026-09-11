@@ -33,6 +33,129 @@ jobs:
 
           gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}" --jq .body > issue_body.md
 
+          cat > workflow_common.py << 'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          WORKFLOW_ERROR_MARKER = "## Workflow Error"
+
+
+          def append_workflow_error(issue_body: str, detail: str) -> str:
+              body = issue_body.rstrip()
+              marker_block = f"\n---\n\n{WORKFLOW_ERROR_MARKER}\n\n"
+              if WORKFLOW_ERROR_MARKER in body:
+                  body = body.split(marker_block)[0].rstrip()
+                  if body.endswith("---"):
+                      body = body[:-3].rstrip()
+              return f"{body}{marker_block}> [!WARNING]\n{detail}"
+
+
+          def download_attachment(url: str, output: str, gh_pat: str) -> str:
+              if not gh_pat:
+                  raise ValueError("GH_PAT is required for private repo download")
+              env = {**os.environ, "GH_TOKEN": gh_pat}
+
+              match = re.match(
+                  r"https://github\.com/([^/]+)/([^/]+)/raw/refs/heads/([^/]+)/(.+)$",
+                  url,
+              )
+              if match:
+                  owner, repo, ref, path = match.groups()
+                  result = subprocess.run(
+                      [
+                          "gh",
+                          "api",
+                          "-H",
+                          "Accept: application/vnd.github.raw+json",
+                          f"repos/{owner}/{repo}/contents/{path}?ref={ref}",
+                      ],
+                      env=env,
+                      capture_output=True,
+                      check=True,
+                  )
+                  with open(output, "wb") as out_file:
+                      out_file.write(result.stdout)
+                  if not result.stdout:
+                      raise ValueError("gh api returned empty file content")
+                  return "gh_api_contents"
+
+              if re.search(r"github\.com/user-attachments/", url) or "user-images.githubusercontent.com" in url:
+                  subprocess.run(
+                      ["gh", "attach", "download", url, "-O", output],
+                      env=env,
+                      check=True,
+                  )
+                  if not os.path.getsize(output):
+                      raise ValueError("gh attach downloaded empty file")
+                  return "gh_attach"
+
+              raise ValueError(f"Unsupported attachment URL: {url}")
+
+
+          def write_error(detail: str) -> None:
+              issue_number = os.environ["ISSUE_NUMBER"]
+              repository = os.environ["REPOSITORY"]
+              with open("issue_body.md", encoding="utf-8") as issue_file:
+                  issue_body = issue_file.read()
+              error_body = append_workflow_error(issue_body, detail)
+              with open("issue_formatted.md", "w", encoding="utf-8") as out_file:
+                  out_file.write(error_body)
+              subprocess.run(
+                  [
+                      "gh",
+                      "issue",
+                      "edit",
+                      issue_number,
+                      "--repo",
+                      repository,
+                      "--body-file",
+                      "issue_formatted.md",
+                  ],
+                  check=True,
+              )
+
+
+          def write_download_error(kind: str) -> None:
+              download_url = os.environ["DOWNLOAD_URL"]
+              download_error = os.environ.get("DOWNLOAD_ERROR", "unknown error")
+              title = (
+                  "Failed to download diagnostic archive"
+                  if kind == "diagnostic"
+                  else "Failed to download log file"
+              )
+              detail = (
+                  f"> **{title}.** URL: `{download_url}`\n"
+                  f"> Error: {download_error}\n"
+                  f"> Ensure `GH_PAT` is a Classic PAT with `repo` scope and SSO authorization, "
+                  f"then edit this issue to retry."
+              )
+              if "/raw/refs/heads/" in download_url:
+                  detail += (
+                      "\n> For attachments-repo URLs, ensure `GH_PAT` can read "
+                      "`Brook-Design-LLC/BrookFirewall_Discuss_Attachments`."
+                  )
+              write_error(detail)
+
+
+          if __name__ == "__main__":
+              command = sys.argv[1]
+              if command == "write_error":
+                  write_error(os.environ["DETAIL"])
+              elif command == "download":
+                  method = download_attachment(
+                      os.environ["DOWNLOAD_URL"],
+                      sys.argv[2],
+                      os.environ["GH_PAT"],
+                  )
+                  print(method)
+              elif command == "write_download_error":
+                  write_download_error(sys.argv[2])
+              else:
+                  raise ValueError(f"Unknown command: {command}")
+          PY
+
           URL_RESULT="$(python3 - << 'PY'
           import pathlib
           import re
@@ -168,48 +291,7 @@ jobs:
 
           write_warning_issue() {
             local detail="$1"
-            DETAIL="$detail" python3 - << 'EOF'
-          import os
-          import re
-          import subprocess
-
-          issue_number = os.environ["ISSUE_NUMBER"]
-          repository = os.environ["REPOSITORY"]
-          detail = os.environ["DETAIL"]
-          with open("issue_body.md", encoding="utf-8") as f:
-              issue_body = f.read()
-
-          def extract_field(label: str, text: str) -> str:
-              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
-              match = re.search(pattern, text, re.DOTALL)
-              return match.group(1).strip() if match else ""
-
-          desc = extract_field("Description", issue_body)
-          error_body = f"{desc}\n\n> [!WARNING]\n{detail}"
-          with open("issue_formatted.md", "w", encoding="utf-8") as f:
-              f.write(error_body)
-          subprocess.run(
-              ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", "issue_formatted.md"],
-              check=True,
-          )
-          EOF
-          }
-
-          download_attachment() {
-            local url="$1" output="$2"
-            if [[ "$url" == *"user-attachments"* ]] || [[ "$url" == *"user-images.githubusercontent.com"* ]]; then
-              GH_TOKEN="$GH_PAT" gh attach download "$url" -O "$output"
-              return $?
-            fi
-            if [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/raw/refs/heads/([^/]+)/(.+)$ ]]; then
-              local owner="${BASH_REMATCH[1]}" repo="${BASH_REMATCH[2]}" ref="${BASH_REMATCH[3]}" path="${BASH_REMATCH[4]}"
-              GH_TOKEN="$GH_PAT" gh api \
-                -H "Accept: application/vnd.github.raw+json" \
-                "repos/${owner}/${repo}/contents/${path}?ref=${ref}" > "$output"
-              return $?
-            fi
-            echo "Unsupported attachment URL: $url" >&2
-            return 1
+            DETAIL="$detail" python3 workflow_common.py write_error
           }
 
           if [[ "$URL_RESULT" == "MULTIPLE_BKGLOG" ]]; then
@@ -255,7 +337,7 @@ jobs:
               if [ "$delay" -gt 0 ]; then
                 sleep "$delay"
               fi
-              if download_attachment "$DOWNLOAD_URL" issue.archive 2>download.err; then
+              if GH_PAT="$GH_PAT" DOWNLOAD_URL="$DOWNLOAD_URL" python3 workflow_common.py download issue.archive 2>download.err; then
                 download_ok=true
                 download_error=""
                 break
@@ -264,45 +346,7 @@ jobs:
             done
 
             if [ "$download_ok" != true ] || [ ! -s issue.archive ]; then
-              DOWNLOAD_URL="$DOWNLOAD_URL" DOWNLOAD_ERROR="$download_error" python3 - << 'EOF'
-          import os
-          import re
-          import subprocess
-
-          issue_number = os.environ["ISSUE_NUMBER"]
-          repository = os.environ["REPOSITORY"]
-          download_url = os.environ["DOWNLOAD_URL"]
-          download_error = os.environ.get("DOWNLOAD_ERROR", "unknown error")
-          with open("issue_body.md", encoding="utf-8") as f:
-              issue_body = f.read()
-
-          def extract_field(label: str, text: str) -> str:
-              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
-              match = re.search(pattern, text, re.DOTALL)
-              return match.group(1).strip() if match else ""
-
-          desc = extract_field("Description", issue_body)
-          repo_note = ""
-          if "/raw/refs/heads/" in download_url:
-              repo_note = (
-                  "\n> For attachments-repo URLs, ensure `GH_PAT` can read "
-                  "`Brook-Design-LLC/BrookFirewall_Discuss_Attachments`."
-              )
-          error_body = (
-              f"{desc}\n\n"
-              f"> [!WARNING]\n"
-              f"> **Failed to download diagnostic archive.** URL: `{download_url}`\n"
-              f"> Error: {download_error}\n"
-              f"> Ensure `GH_PAT` is a Classic PAT with `repo` scope and SSO authorization, then edit this issue to retry."
-              f"{repo_note}"
-          )
-          with open("issue_formatted.md", "w", encoding="utf-8") as f:
-              f.write(error_body)
-          subprocess.run(
-              ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", "issue_formatted.md"],
-              check=True,
-          )
-          EOF
+              DOWNLOAD_URL="$DOWNLOAD_URL" DOWNLOAD_ERROR="$download_error" python3 workflow_common.py write_download_error diagnostic
               exit 0
             fi
 
@@ -597,7 +641,7 @@ jobs:
             if [ "$delay" -gt 0 ]; then
               sleep "$delay"
             fi
-            if download_attachment "$DOWNLOAD_URL" issue_log.txt 2>download.err; then
+            if GH_PAT="$GH_PAT" DOWNLOAD_URL="$DOWNLOAD_URL" python3 workflow_common.py download issue_log.txt 2>download.err; then
               download_ok=true
               download_error=""
               break
@@ -606,45 +650,7 @@ jobs:
           done
 
           if [ "$download_ok" != true ] || [ ! -s issue_log.txt ]; then
-            DOWNLOAD_URL="$DOWNLOAD_URL" DOWNLOAD_ERROR="$download_error" python3 - << 'EOF'
-          import os
-          import re
-          import subprocess
-
-          issue_number = os.environ["ISSUE_NUMBER"]
-          repository = os.environ["REPOSITORY"]
-          download_url = os.environ["DOWNLOAD_URL"]
-          download_error = os.environ.get("DOWNLOAD_ERROR", "unknown error")
-          with open("issue_body.md", encoding="utf-8") as f:
-              issue_body = f.read()
-
-          def extract_field(label: str, text: str) -> str:
-              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
-              match = re.search(pattern, text, re.DOTALL)
-              return match.group(1).strip() if match else ""
-
-          desc = extract_field("Description", issue_body)
-          repo_note = ""
-          if "/raw/refs/heads/" in download_url:
-              repo_note = (
-                  "\n> For attachments-repo URLs, ensure `GH_PAT` can read "
-                  "`Brook-Design-LLC/BrookFirewall_Discuss_Attachments`."
-              )
-          error_body = (
-              f"{desc}\n\n"
-              f"> [!WARNING]\n"
-              f"> **Failed to download log file.** URL: `{download_url}`\n"
-              f"> Error: {download_error}\n"
-              f"> Ensure `GH_PAT` is a Classic PAT with `repo` scope and SSO authorization, then edit this issue to retry."
-              f"{repo_note}"
-          )
-          with open("issue_formatted.md", "w", encoding="utf-8") as f:
-              f.write(error_body)
-          subprocess.run(
-              ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", "issue_formatted.md"],
-              check=True,
-          )
-          EOF
+            DOWNLOAD_URL="$DOWNLOAD_URL" DOWNLOAD_ERROR="$download_error" python3 workflow_common.py write_download_error log
             exit 0
           fi
 
