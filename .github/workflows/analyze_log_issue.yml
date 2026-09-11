@@ -11,7 +11,8 @@ jobs:
   analyze-and-format:
     if: |
       !contains(github.event.issue.body, '## Info') &&
-      contains(github.event.issue.body, '### Log File Attachment')
+      (contains(github.event.issue.body, '.bkglog') ||
+       contains(github.event.issue.body, '### Log File Attachment'))
     runs-on: ubuntu-latest
     steps:
       # sudosubin/gh-attach resolves user-attachments 302 → S3 presigned URL downloads
@@ -65,65 +66,42 @@ jobs:
                       urls.append(url)
               return urls
 
+          def is_bkglog_url(url: str) -> bool:
+              return bool(re.search(r"\.bkglog(\?|$)", url, re.I))
+
           def is_log_url(url: str) -> bool:
-              return bool(re.search(r"\.(log|txt)(\.part\d+)?(\?|$)", url, re.I))
+              return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
 
-          def is_whole_log(url: str) -> bool:
-              return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I)) and not re.search(
-                  r"\.part\d+(\?|$)", url, re.I
-              )
+          all_urls = find_all_attachment_urls(body)
+          bkglog_urls = [u for u in all_urls if is_bkglog_url(u)]
 
-          def part_number(url: str) -> int | None:
-              match = re.search(r"\.part(\d+)(\?|$)", url, re.I)
-              return int(match.group(1)) if match else None
-
-          def log_group_key(url: str) -> str:
-              name = url.rsplit("/", 1)[-1].split("?")[0]
-              return re.sub(r"\.(log|txt)(\.part\d+)?$", "", name, flags=re.I)
-
-          import json
-
-          log_field = extract_field("Log File Attachment", body)
-          all_urls = find_all_attachment_urls(log_field)
-          log_urls = [u for u in all_urls if is_log_url(u)]
-          whole_logs = [u for u in log_urls if is_whole_log(u)]
-          part_logs = [u for u in log_urls if part_number(u) is not None]
-
-          if whole_logs and part_logs:
-              print("MULTIPLE:mix")
-          elif len(whole_logs) > 1:
-              print("MULTIPLE:whole")
-          elif len(whole_logs) == 1:
-              print(f"OK:{whole_logs[0]}")
-          elif part_logs:
-              groups: dict[str, list[str]] = {}
-              for url in part_logs:
-                  groups.setdefault(log_group_key(url), []).append(url)
-              if len(groups) > 1:
-                  print("MULTIPLE:parts")
+          if bkglog_urls:
+              if len(bkglog_urls) > 1:
+                  print("MULTIPLE_BKGLOG")
               else:
-                  urls_sorted = sorted(next(iter(groups.values())), key=lambda u: part_number(u))
-                  nums = [part_number(u) for u in urls_sorted]
-                  expected = list(range(1, len(nums) + 1))
-                  if nums != expected:
-                      print(f"MULTIPLE:incomplete:{','.join(str(n) for n in nums)}")
-                  else:
-                      print("PARTS:" + json.dumps(urls_sorted))
+                  print(f"BKGLOG:{bkglog_urls[0]}")
           else:
-              print("NONE")
+              log_field = extract_field("Log File Attachment", body)
+              log_urls = [u for u in find_all_attachment_urls(log_field) if is_log_url(u)]
+              if len(log_urls) > 1:
+                  print("MULTIPLE_LOG")
+              elif len(log_urls) == 1:
+                  print(f"OK:{log_urls[0]}")
+              else:
+                  print("NONE")
           PY
           )"
 
-          if [[ "$URL_RESULT" == MULTIPLE:* ]]; then
-            MULTIPLE_REASON="${URL_RESULT#MULTIPLE:}"
-            MULTIPLE_REASON="$MULTIPLE_REASON" python3 - << 'EOF'
+          write_warning_issue() {
+            local detail="$1"
+            DETAIL="$detail" python3 - << 'EOF'
           import os
           import re
           import subprocess
 
           issue_number = os.environ["ISSUE_NUMBER"]
           repository = os.environ["REPOSITORY"]
-          reason = os.environ.get("MULTIPLE_REASON", "")
+          detail = os.environ["DETAIL"]
           with open("issue_body.md", encoding="utf-8") as f:
               issue_body = f.read()
 
@@ -133,19 +111,6 @@ jobs:
               return match.group(1).strip() if match else ""
 
           desc = extract_field("Description", issue_body)
-          if reason == "incomplete" or reason.startswith("incomplete:"):
-              nums = reason.split(":", 1)[1] if ":" in reason else "?"
-              detail = (
-                  f"> **Incomplete split log series.** Found parts: {nums}. "
-                  f"> Upload all consecutive `.txt.partN` files (part1, part2, …) from the same split."
-              )
-          elif reason == "mix":
-              detail = "> **Mixed log uploads.** Upload either one whole log file or a split part series, not both."
-          elif reason == "parts":
-              detail = "> **Multiple split log series detected.** Only one log (or one split series) is allowed."
-          else:
-              detail = "> **Multiple log files detected.** Upload one `.txt`/`.log` file or one split part series."
-
           error_body = f"{desc}\n\n> [!WARNING]\n{detail}"
           with open("issue_formatted.md", "w", encoding="utf-8") as f:
               f.write(error_body)
@@ -154,143 +119,213 @@ jobs:
               check=True,
           )
           EOF
+          }
+
+          if [[ "$URL_RESULT" == "MULTIPLE_BKGLOG" ]]; then
+            write_warning_issue "> **Multiple .bkglog files detected.** Upload only one `.bkglog` file per issue."
             exit 0
           fi
 
-          DOWNLOAD_URL=""
-          LOG_URLS_JSON="[]"
-          if [[ "$URL_RESULT" == OK:* ]]; then
-            DOWNLOAD_URL="${URL_RESULT#OK:}"
-            LOG_URLS_JSON="$(python3 -c 'import json,sys; print(json.dumps([sys.argv[1]]))' "$DOWNLOAD_URL")"
-          elif [[ "$URL_RESULT" == PARTS:* ]]; then
-            LOG_URLS_JSON="${URL_RESULT#PARTS:}"
-            DOWNLOAD_URL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])[0])' "$LOG_URLS_JSON")"
+          if [[ "$URL_RESULT" == "MULTIPLE_LOG" ]]; then
+            write_warning_issue "> **Multiple log files detected.** Upload one `.txt`/`.log` file or one `.bkglog` file."
+            exit 0
           fi
 
-          if [ -z "$DOWNLOAD_URL" ] && [ "$LOG_URLS_JSON" = "[]" ]; then
-            python3 - << 'EOF'
-          import os
-          import re
-          import subprocess
-
-          issue_number = os.environ["ISSUE_NUMBER"]
-          repository = os.environ["REPOSITORY"]
-          with open("issue_body.md", encoding="utf-8") as f:
-              issue_body = f.read()
-
-          def extract_field(label: str, text: str) -> str:
-              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
-              match = re.search(pattern, text, re.DOTALL)
-              return match.group(1).strip() if match else ""
-
-          desc = extract_field("Description", issue_body)
-          error_body = (
-              f"{desc}\n\n"
-              f"> [!WARNING]\n"
-              f"> **No log file attachment detected.** Please edit this issue and upload a valid `.txt` or `.log` file."
-          )
-          with open("issue_formatted.md", "w", encoding="utf-8") as f:
-              f.write(error_body)
-          subprocess.run(
-              ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", "issue_formatted.md"],
-              check=True,
-          )
-          EOF
+          if [[ "$URL_RESULT" == "NONE" ]]; then
+            write_warning_issue "> **No log file attachment detected.** Please edit this issue and upload a valid `.bkglog`, `.txt`, or `.log` file."
             exit 0
           fi
 
           if [ -z "${GH_PAT:-}" ]; then
-            python3 - << 'EOF'
-          import os
-          import re
-          import subprocess
-
-          issue_number = os.environ["ISSUE_NUMBER"]
-          repository = os.environ["REPOSITORY"]
-          with open("issue_body.md", encoding="utf-8") as f:
-              issue_body = f.read()
-
-          def extract_field(label: str, text: str) -> str:
-              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
-              match = re.search(pattern, text, re.DOTALL)
-              return match.group(1).strip() if match else ""
-
-          desc = extract_field("Description", issue_body)
-          error_body = (
-              f"{desc}\n\n"
-              f"> [!WARNING]\n"
-              f"> **Log download is not configured.** Add `GH_PAT` (Classic PAT with `repo` scope) "
-              f"> as a repository Actions secret before uploaded logs can be analyzed."
-          )
-          with open("issue_formatted.md", "w", encoding="utf-8") as f:
-              f.write(error_body)
-          subprocess.run(
-              ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", "issue_formatted.md"],
-              check=True,
-          )
-          EOF
+            write_warning_issue "> **Log download is not configured.** Add \`GH_PAT\` (Classic PAT with \`repo\` scope) as a repository Actions secret before uploaded logs can be analyzed."
             exit 0
           fi
 
-          download_ok=false
-          download_error=""
-          if [[ "$URL_RESULT" == PARTS:* ]]; then
-            if LOG_URLS_JSON="$LOG_URLS_JSON" python3 - << 'PY'
-          import json
-          import os
-          import subprocess
-          import sys
-          import time
+          if [[ "$URL_RESULT" == BKGLOG:* ]]; then
+            DOWNLOAD_URL="${URL_RESULT#BKGLOG:}"
 
-          urls = json.loads(os.environ["LOG_URLS_JSON"])
-          gh_pat = os.environ.get("GH_PAT", "")
-          download_error = ""
-
-          for index, url in enumerate(urls, start=1):
-              out_path = f"issue_log.part{index}"
-              part_ok = False
-              for delay in (0, 10, 20, 30):
-                  if delay:
-                      time.sleep(delay)
-                  result = subprocess.run(
-                      ["gh", "attach", "download", url, "-O", out_path],
-                      env={**os.environ, "GH_TOKEN": gh_pat},
-                      capture_output=True,
-                      text=True,
-                  )
-                  if result.returncode == 0 and os.path.getsize(out_path) > 0:
-                      part_ok = True
-                      download_error = ""
-                      break
-                  download_error = (result.stderr or result.stdout or "unknown error").strip()
-              if not part_ok:
-                  with open("download.err", "w", encoding="utf-8") as err_file:
-                      err_file.write(download_error)
-                  sys.exit(1)
-
-          with open("issue_log.txt", "wb") as merged:
-              for index in range(1, len(urls) + 1):
-                  with open(f"issue_log.part{index}", "rb") as part_file:
-                      merged.write(part_file.read())
-          PY
-            then
-              download_ok=true
-            else
-              download_error="$(cat download.err 2>/dev/null || echo unknown error)"
-            fi
-          else
+            download_ok=false
+            download_error=""
             for delay in 0 10 20 30; do
               if [ "$delay" -gt 0 ]; then
                 sleep "$delay"
               fi
-              if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue_log.txt 2>download.err; then
+              if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue.bkglog 2>download.err; then
                 download_ok=true
                 download_error=""
                 break
               fi
               download_error="$(cat download.err)"
             done
+
+            if [ "$download_ok" != true ] || [ ! -s issue.bkglog ]; then
+              DOWNLOAD_URL="$DOWNLOAD_URL" DOWNLOAD_ERROR="$download_error" python3 - << 'EOF'
+          import os
+          import re
+          import subprocess
+
+          issue_number = os.environ["ISSUE_NUMBER"]
+          repository = os.environ["REPOSITORY"]
+          download_url = os.environ["DOWNLOAD_URL"]
+          download_error = os.environ.get("DOWNLOAD_ERROR", "unknown error")
+          with open("issue_body.md", encoding="utf-8") as f:
+              issue_body = f.read()
+
+          def extract_field(label: str, text: str) -> str:
+              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
+              match = re.search(pattern, text, re.DOTALL)
+              return match.group(1).strip() if match else ""
+
+          desc = extract_field("Description", issue_body)
+          error_body = (
+              f"{desc}\n\n"
+              f"> [!WARNING]\n"
+              f"> **Failed to download .bkglog file.** URL: `{download_url}`\n"
+              f"> Error: {download_error}\n"
+              f"> Ensure `GH_PAT` is a Classic PAT with `repo` scope and SSO authorization, then edit this issue to retry."
+          )
+          with open("issue_formatted.md", "w", encoding="utf-8") as f:
+              f.write(error_body)
+          subprocess.run(
+              ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", "issue_formatted.md"],
+              check=True,
+          )
+          EOF
+              exit 0
+            fi
+
+            if ! tar -xzf issue.bkglog analyze.txt 2>extract.err; then
+              write_warning_issue "> **Failed to extract analyze.txt from .bkglog.** Ensure the file is a valid BrookFirewall diagnostic archive."
+              exit 0
+            fi
+
+            if [ ! -s analyze.txt ]; then
+              write_warning_issue "> **analyze.txt is missing or empty in .bkglog.** Ensure the archive was exported from BrookFirewall."
+              exit 0
+            fi
+
+            DOWNLOAD_URL="$DOWNLOAD_URL" python3 - << 'EOF'
+          import os
+          import re
+          import subprocess
+
+          issue_number = os.environ.get("ISSUE_NUMBER", "")
+          repository = os.environ.get("REPOSITORY", "")
+          download_url = os.environ.get("DOWNLOAD_URL", "")
+
+          def gh_issue_edit(body_file: str, title: str | None = None) -> None:
+              cmd = ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", body_file]
+              if title:
+                  cmd.extend(["--title", title])
+              subprocess.run(cmd, check=True)
+
+          def extract_field(label: str, text: str) -> str:
+              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
+              match = re.search(pattern, text, re.DOTALL)
+              return match.group(1).strip() if match else ""
+
+          patterns = [
+              r"https://github\.com/user-attachments/assets/[a-f0-9\-]+",
+              r"https://github\.com/user-attachments/files/\d+/[^\s\)\>]+",
+              r"https://github\.com/[^/\s\)\>]+/[^/\s\)\>]+/files/\d+/[^\s\)\>]+",
+              r"https://github\.com/[^\s\)\>]+/user-attachments/files/\d+/[^\s\)\>]+",
+              r"https://(?:private-)?user-images\.githubusercontent\.com/[^\s\)\>]+",
+          ]
+
+          def find_all_attachment_urls(text: str) -> list[str]:
+              urls: list[str] = []
+              seen: set[str] = set()
+              for pattern in patterns:
+                  for match in re.finditer(pattern, text):
+                      url = match.group(0)
+                      if url not in seen:
+                          seen.add(url)
+                          urls.append(url)
+              for match in re.finditer(r"\]\((https?://[^\)]+)\)", text):
+                  url = match.group(1)
+                  if url not in seen:
+                      seen.add(url)
+                      urls.append(url)
+              return urls
+
+          def is_bkglog_url(url: str) -> bool:
+              return bool(re.search(r"\.bkglog(\?|$)", url, re.I))
+
+          def is_log_url(url: str) -> bool:
+              return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
+
+          with open("issue_body.md", encoding="utf-8") as f:
+              issue_body = f.read()
+          with open("analyze.txt", encoding="utf-8", errors="replace") as f:
+              analyze_md = f.read().strip()
+
+          desc = extract_field("Description", issue_body)
+          attachment_fields = [
+              extract_field("Log File Attachment", issue_body),
+              extract_field("Attachments", issue_body),
+              extract_field("Screenshots / Videos", issue_body),
+          ]
+          excluded_urls = {download_url}
+          excluded_urls.update(u for u in find_all_attachment_urls(issue_body) if is_bkglog_url(u) or is_log_url(u))
+
+          media_lines = []
+          for field in attachment_fields:
+              for line in field.splitlines():
+                  stripped = line.strip()
+                  if not stripped:
+                      continue
+                  if any(url in stripped for url in excluded_urls):
+                      continue
+                  if stripped in excluded_urls:
+                      continue
+                  media_lines.append(line)
+          media = "\n".join(media_lines).strip()
+
+          body_parts = [analyze_md]
+          if desc and "## Description" not in analyze_md:
+              body_parts.append(f"## Description\n\n{desc}")
+          if media and "## Screenshots / Videos" not in analyze_md:
+              body_parts.append(f"## Screenshots / Videos\n\n{media}")
+          body_parts.append(f"---\n**Attached Log File:** [Download Log File]({download_url})")
+
+          formatted_body = "\n\n".join(body_parts)
+          cleaned_body = "\n".join([line.strip() for line in formatted_body.splitlines()])
+
+          with open("issue_formatted.md", "w", encoding="utf-8") as f:
+              f.write(cleaned_body)
+
+          title_result = subprocess.run(
+              ["gh", "api", f"repos/{repository}/issues/{issue_number}", "--jq", ".title"],
+              capture_output=True,
+              text=True,
+              check=True,
+          )
+          current_title = title_result.stdout.strip()
+          if current_title.startswith("[Report]"):
+              new_title = current_title
+          else:
+              new_title = re.sub(r"^\[Log Analysis\]:?\s*", "[Report] ", current_title)
+
+          gh_issue_edit("issue_formatted.md", title=new_title)
+          EOF
+            exit 0
           fi
+
+          DOWNLOAD_URL="${URL_RESULT#OK:}"
+
+          download_ok=false
+          download_error=""
+          for delay in 0 10 20 30; do
+            if [ "$delay" -gt 0 ]; then
+              sleep "$delay"
+            fi
+            if GH_TOKEN="$GH_PAT" gh attach download "$DOWNLOAD_URL" -O issue_log.txt 2>download.err; then
+              download_ok=true
+              download_error=""
+              break
+            fi
+            download_error="$(cat download.err)"
+          done
 
           if [ "$download_ok" != true ] || [ ! -s issue_log.txt ]; then
             DOWNLOAD_URL="$DOWNLOAD_URL" DOWNLOAD_ERROR="$download_error" python3 - << 'EOF'
@@ -328,8 +363,7 @@ jobs:
             exit 0
           fi
 
-          LOG_URLS_JSON="$LOG_URLS_JSON" DOWNLOAD_URL="$DOWNLOAD_URL" python3 - << 'EOF'
-          import json
+          DOWNLOAD_URL="$DOWNLOAD_URL" python3 - << 'EOF'
           import os
           import re
           import subprocess
@@ -337,9 +371,7 @@ jobs:
           issue_number = os.environ.get("ISSUE_NUMBER", "")
           repository = os.environ.get("REPOSITORY", "")
           download_url = os.environ.get("DOWNLOAD_URL", "")
-          log_urls = json.loads(os.environ.get("LOG_URLS_JSON", "[]") or "[]")
-          if not log_urls and download_url:
-              log_urls = [download_url]
+          log_urls = [download_url] if download_url else []
 
           def gh_issue_edit(body_file: str, title: str | None = None) -> None:
               cmd = ["gh", "issue", "edit", issue_number, "--repo", repository, "--body-file", body_file]
@@ -358,7 +390,7 @@ jobs:
               return match.group(1).strip() if match else ""
 
           def is_log_url(url: str) -> bool:
-              return bool(re.search(r"\.(log|txt)(\.part\d+)?(\?|$)", url, re.I))
+              return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
 
           desc = extract_field("Description", issue_body)
           log_field = extract_field("Log File Attachment", issue_body)

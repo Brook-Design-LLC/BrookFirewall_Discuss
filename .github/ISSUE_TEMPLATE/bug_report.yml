@@ -7,11 +7,9 @@ body:
       value: |
         Please fill out the form below to report an issue with BrookFirewall.
 
-        **File size limit:** Each attachment must be 10 MB or smaller (including `.log` and `.txt` files).
+        **File size limit:** Each attachment must be 10 MB or smaller.
 
-        **Offline browser tools (10 MB per file limit):**
-        - [Compress media](https://brook-design-llc.github.io/BrookFirewall_Discuss/media-compress.html) — `https://brook-design-llc.github.io/BrookFirewall_Discuss/media-compress.html`
-        - [Split large logs](https://brook-design-llc.github.io/BrookFirewall_Discuss/log-split.html) — `https://brook-design-llc.github.io/BrookFirewall_Discuss/log-split.html`
+        **Offline tool:** [Brook Media Compressor](https://github.com/Brook-Design-LLC/BrookMediaCompressor) — compress media before uploading.
   - type: input
     id: os
     attributes:
@@ -61,8 +59,8 @@ body:
     attributes:
       label: Attachments
       description: |
-        Optional screenshots, videos, or log files. Each file must be 10 MB or smaller (including log files).
-        Use the offline tools at the top of this form if you need to compress media or split large logs.
+        Optional screenshots, videos, or log files. Each file must be 10 MB or smaller.
+        Upload a `.bkglog` file for automated analysis, or use Brook Media Compressor for large media.
     validations:
       required: false
-      accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm,.log,.txt"
+      accept: ".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm,.log,.txt,.bkglog"

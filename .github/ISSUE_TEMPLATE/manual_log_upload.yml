@@ -5,13 +5,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please provide an issue description and upload your `.txt` or `.log` file below. The automated bot will download the log, run analysis, and format this issue. You may also attach screenshots or videos in the same upload field.
+        Please provide an issue description and upload your log file below. The automated bot will download the log, run analysis, and format this issue. You may also attach screenshots or videos in the same upload field.
 
-        **File size limit:** Each file must be 10 MB or smaller (including `.log` and `.txt` files).
+        **File size limit:** Each file must be 10 MB or smaller.
 
-        **Offline browser tools (10 MB per file limit):**
-        - [Compress media](https://brook-design-llc.github.io/BrookFirewall_Discuss/media-compress.html) — `https://brook-design-llc.github.io/BrookFirewall_Discuss/media-compress.html`
-        - [Split large logs](https://brook-design-llc.github.io/BrookFirewall_Discuss/log-split.html) — `https://brook-design-llc.github.io/BrookFirewall_Discuss/log-split.html`
+        **Offline tool:** [Brook Media Compressor](https://github.com/Brook-Design-LLC/BrookMediaCompressor) — compress media before uploading.
   - type: textarea
     id: description
     attributes:
@@ -25,10 +23,9 @@ body:
     attributes:
       label: Log File Attachment
       description: |
-        Upload exactly one `.txt` or `.log` file (required for analysis), or a split part series (`*.txt.part1`, `*.txt.part2`, …).
+        Upload a `.bkglog` file (preferred) or a single `.txt`/`.log` file for analysis.
         You may also attach screenshots or videos in this same field.
-        Each file must be 10 MB or smaller (including log files).
-        If a file exceeds 10 MB, use the offline tools linked above before uploading.
+        Each file must be 10 MB or smaller.
     validations:
       required: true
-      accept: ".log,.txt,.png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm"
+      accept: ".bkglog,.log,.txt,.png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm"
