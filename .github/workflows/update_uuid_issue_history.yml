@@ -268,10 +268,12 @@ jobs:
         if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FAE_PROJECT_URL: ${{ secrets.FAE_PROJECT_URL }}
+          ORG_READ_TOKEN: ${{ secrets.ORG_READ_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
           ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           REPOSITORY: ${{ github.repository }}
           ORG: ${{ github.repository_owner }}
+          TEAM_SLUG: fae
         run: |
           set +e -uo pipefail
           export GH_REPO="${REPOSITORY}"
@@ -283,37 +285,60 @@ jobs:
             exit 0
           fi
 
-          if [ -z "${FAE_PROJECT_URL:-}" ]; then
-            echo "FAE_PROJECT_URL not configured; skipping FAE notification."
-            exit 0
-          fi
-
           if gh api "repos/${REPOSITORY}/issues/${ISSUE_NUMBER}/comments" --paginate --jq '.[].body' 2>/dev/null \
             | grep -q "${NOTIFY_MARKER}"; then
             echo "FAE notification comment already exists; skipping."
             exit 0
           fi
 
-          CLIENT_UUID="$(cat client_uuid.txt)"
+          TEAM_TOKEN="${ORG_READ_TOKEN:-${GH_PAT:-}}"
+          if [ -z "${TEAM_TOKEN}" ]; then
+            echo "::warning::ORG_READ_TOKEN or GH_PAT required to list FAE team members; skipping notification."
+            exit 0
+          fi
 
-          python3 - << PY
+          export TEAM_TOKEN
+
+          python3 - << 'PY'
           import os
+          import subprocess
+          import sys
 
           org = os.environ["ORG"]
-          issue_number = os.environ["ISSUE_NUMBER"]
-          client_uuid = open("client_uuid.txt", encoding="utf-8").read().strip()
-          project_url = os.environ["FAE_PROJECT_URL"]
+          team_slug = os.environ["TEAM_SLUG"]
+          team_token = os.environ.get("TEAM_TOKEN", "")
           marker = "<!-- fae-project-notified -->"
 
-          body = (
-              f"@{org}/fae 新的用戶報告已加入 FAE Support project。\n\n"
-              "| | |\n"
-              "| --- | --- |\n"
-              f"| Issue | #{issue_number} |\n"
-              f"| Client UUID | `{client_uuid}` |\n"
-              f"| Project | [FAE Support]({project_url}) |\n\n"
-              f"{marker}\n"
-          )
+          members: list[str] = []
+          if team_token:
+              result = subprocess.run(
+                  [
+                      "gh",
+                      "api",
+                      f"orgs/{org}/teams/{team_slug}/members",
+                      "--paginate",
+                      "--jq",
+                      ".[].login",
+                  ],
+                  env={**os.environ, "GH_TOKEN": team_token},
+                  capture_output=True,
+                  text=True,
+              )
+              if result.returncode == 0:
+                  members = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+          if members:
+              mentions = " ".join(f"@{login}" for login in members)
+              body = f"{mentions} 新的用戶報告已加入 FAE Support project。\n\n{marker}\n"
+          else:
+              body = (
+                  f"@{org}/{team_slug} 新的用戶報告已加入 FAE Support project。\n\n"
+                  f"{marker}\n"
+              )
+              print(
+                  "::warning::Could not list FAE team members; "
+                  "falling back to team mention (may not notify)."
+              )
 
           with open("notify_comment.md", "w", encoding="utf-8") as out_file:
               out_file.write(body)
