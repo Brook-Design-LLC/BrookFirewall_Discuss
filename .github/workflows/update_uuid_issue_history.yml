@@ -157,6 +157,10 @@ jobs:
               current_issue = fetch_issue(issue_number, repository)
               issue_body = current_issue["body"]
 
+              if ISSUE_HISTORY_MARKER in issue_body:
+                  print("User Issue History already present; skipping.")
+                  return
+
               uuid = extract_client_uuid(issue_body)
               if not uuid:
                   print("No Client UUID found in issue body; skipping.")
@@ -205,7 +209,7 @@ jobs:
           ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
 
           if [ -z "${FAE_PROJECT_URL:-}" ] || [ -z "${GH_TOKEN:-}" ]; then
             echo "FAE_PROJECT_URL or GH_PAT not configured; skipping project step."
@@ -233,7 +237,7 @@ jobs:
             ITEM_ID="$(echo "${ITEM_JSON}" | jq -r '.id')"
           else
             echo "::warning::item-add failed, checking for existing project item: ${ITEM_JSON}"
-            ITEM_ID="$(gh project item-list "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --format json --jq ".items[] | select(.content.url == \"${ISSUE_URL}\") | .id" | head -n 1)"
+            ITEM_ID="$(gh project item-list "${PROJECT_NUMBER}" --owner "${PROJECT_OWNER}" --format json --jq ".items[] | select(.content.url == \"${ISSUE_URL}\") | .id" 2>/dev/null | head -n 1 || true)"
           fi
 
           if [ -z "${ITEM_ID}" ] || [ "${ITEM_ID}" = "null" ]; then

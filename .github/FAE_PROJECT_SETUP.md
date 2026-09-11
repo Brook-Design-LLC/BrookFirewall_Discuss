@@ -22,7 +22,7 @@ In the repo → **Settings** → **Secrets and variables** → **Actions** → *
 | Secret | Value |
 | --- | --- |
 | `FAE_PROJECT_URL` | Full project URL, e.g. `https://github.com/orgs/Brook-Design-LLC/projects/1` |
-| `GH_PAT` | Classic PAT with `repo` and **`project`** scopes (SSO authorized for the org if required) |
+| `GH_PAT` | Classic PAT with `repo`, **`project`**, and **`read:project`** scopes (SSO authorized for the org if required) |
 
 `GH_PAT` is also used by the log analysis workflow for private attachment downloads.
 
