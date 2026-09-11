@@ -23,9 +23,9 @@ body:
     attributes:
       label: Log File Attachment
       description: |
-        Upload a diagnostic archive (`.tar.gz`, preferred) or a single `.txt`/`.log` file for analysis.
+        Upload a diagnostic archive (`.gz` or `.zip`, preferred) or a single `.txt`/`.log` file for analysis.
         You may also attach screenshots or videos in this same field.
         Each file must be 10 MB or smaller.
     validations:
       required: true
-      accept: ".tar.gz,.log,.txt,.png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm"
+      accept: ".gz,.zip,.log,.txt,.png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.webm"

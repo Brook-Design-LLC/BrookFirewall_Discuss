@@ -68,7 +68,7 @@ jobs:
               return urls
 
           def is_bkglog_url(url: str) -> bool:
-              return bool(re.search(r"\.(bkglog|tar\.gz)(\?|$)", url, re.I))
+              return bool(re.search(r"\.(bkglog|tar\.gz|gz|zip)(\?|$)", url, re.I))
 
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
@@ -195,13 +195,24 @@ jobs:
               exit 0
             fi
 
-            if ! tar -xzf issue.bkglog analyze.txt 2>extract.err; then
-              write_warning_issue "> **Failed to extract analyze.txt from .bkglog.** Ensure the file is a valid BrookFirewall diagnostic archive."
+            extract_ok=false
+            if [[ "$DOWNLOAD_URL" =~ \.zip(\?|$) ]]; then
+              if unzip -p issue.bkglog analyze.txt > analyze.txt 2>extract.err; then
+                extract_ok=true
+              fi
+            else
+              if tar -xzf issue.bkglog analyze.txt 2>extract.err; then
+                extract_ok=true
+              fi
+            fi
+
+            if [ "$extract_ok" != true ]; then
+              write_warning_issue "> **Failed to extract analyze.txt from diagnostic archive.** Ensure the file is a valid BrookFirewall export."
               exit 0
             fi
 
             if [ ! -s analyze.txt ]; then
-              write_warning_issue "> **analyze.txt is missing or empty in .bkglog.** Ensure the archive was exported from BrookFirewall."
+              write_warning_issue "> **analyze.txt is missing or empty in diagnostic archive.** Ensure the archive was exported from BrookFirewall."
               exit 0
             fi
 
@@ -250,7 +261,7 @@ jobs:
               return urls
 
           def is_bkglog_url(url: str) -> bool:
-              return bool(re.search(r"\.(bkglog|tar\.gz)(\?|$)", url, re.I))
+              return bool(re.search(r"\.(bkglog|tar\.gz|gz|zip)(\?|$)", url, re.I))
 
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
