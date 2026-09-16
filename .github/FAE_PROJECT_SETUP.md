@@ -35,12 +35,10 @@ In the repo → **Settings** → **Secrets and variables** → **Actions** → *
 2. [`update_uuid_issue_history.yml`](workflows/update_uuid_issue_history.yml) runs after that dispatch:
    - Searches for related issues by Client UUID (retries if search indexing is slow)
    - Appends **User Issue History** to the issue body
-   - Adds the issue to the FAE project and fills the **Client UUID** field (via `GITHUB_TOKEN`, so timeline shows `github-actions[bot]`)
+   - Adds the issue to the FAE project and fills the **Client UUID** field (via `GH_PAT` with `project` scope)
    - Posts an issue comment with the issue title, `## Description` text, and @mentions for each `fae` team member (one notification per issue)
 
-If `FAE_PROJECT_URL` is missing, history is still written; only the project step is skipped.
-
-Ensure repo **Settings → Actions → General → Workflow permissions** is set to **Read and write permissions**, and the FAE Support project is linked to this repository, so `GITHUB_TOKEN` can add items as `github-actions[bot]` instead of a PAT owner.
+If `FAE_PROJECT_URL` or `GH_PAT` is missing, history is still written; only the project step is skipped.
 
 ## 5. FAE email notifications
 

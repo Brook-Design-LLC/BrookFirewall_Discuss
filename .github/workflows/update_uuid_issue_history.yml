@@ -204,15 +204,15 @@ jobs:
 
       - name: Add to FAE project
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
           FAE_PROJECT_URL: ${{ secrets.FAE_PROJECT_URL }}
           ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set +e -uo pipefail
 
-          if [ -z "${FAE_PROJECT_URL:-}" ]; then
-            echo "FAE_PROJECT_URL not configured; skipping project step."
+          if [ -z "${FAE_PROJECT_URL:-}" ] || [ -z "${GH_TOKEN:-}" ]; then
+            echo "FAE_PROJECT_URL or GH_PAT not configured; skipping project step."
             exit 0
           fi
 
