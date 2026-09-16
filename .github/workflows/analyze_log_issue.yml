@@ -233,7 +233,7 @@ jobs:
           body = pathlib.Path("issue_body.md").read_text(encoding="utf-8")
 
           def extract_field(label: str, text: str) -> str:
-              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
+              pattern = rf"#{{2,3}}\s+{re.escape(label)}\s*\n+(.*?)(?=\n\s*#{{2,3}}\s+|\n---\s*(?:\n|\Z)|\Z)"
               match = re.search(pattern, text, re.DOTALL)
               return match.group(1).strip() if match else ""
 
@@ -565,7 +565,7 @@ jobs:
               subprocess.run(cmd, check=True)
 
           def extract_field(label: str, text: str) -> str:
-              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
+              pattern = rf"#{{2,3}}\s+{re.escape(label)}\s*\n+(.*?)(?=\n\s*#{{2,3}}\s+|\n---\s*(?:\n|\Z)|\Z)"
               match = re.search(pattern, text, re.DOTALL)
               return match.group(1).strip() if match else ""
 
@@ -599,6 +599,37 @@ jobs:
 
           def is_log_url(url: str) -> bool:
               return bool(re.search(r"\.(log|txt)(\?|$)", url, re.I))
+
+          def is_media_url(url: str) -> bool:
+              return bool(re.search(r"\.(png|jpe?g|gif|webp|mp4|mov|webm)(\?|$)", url, re.I))
+
+          def collect_media_lines(issue_body: str, fields: list[str], excluded_urls: set[str]) -> list[str]:
+              media_lines: list[str] = []
+              for field in fields:
+                  for line in field.splitlines():
+                      stripped = line.strip()
+                      if not stripped:
+                          continue
+                      if any(url in stripped for url in excluded_urls):
+                          continue
+                      if stripped in excluded_urls:
+                          continue
+                      media_lines.append(line)
+              if media_lines:
+                  return media_lines
+              for line in issue_body.splitlines():
+                  stripped = line.strip()
+                  if not stripped or stripped.startswith("#") or stripped == "---":
+                      continue
+                  urls = find_all_attachment_urls(stripped)
+                  if not urls:
+                      continue
+                  if any(url in excluded_urls for url in urls):
+                      continue
+                  if all(not is_media_url(url) for url in urls):
+                      continue
+                  media_lines.append(line)
+              return media_lines
 
           def format_config_json(config_text: str) -> str:
               try:
@@ -642,18 +673,9 @@ jobs:
               if is_diagnostic_archive_url(u) or is_log_url(u)
           )
 
-          media_lines = []
-          for field in attachment_fields:
-              for line in field.splitlines():
-                  stripped = line.strip()
-                  if not stripped:
-                      continue
-                  if any(url in stripped for url in excluded_urls):
-                      continue
-                  if stripped in excluded_urls:
-                      continue
-                  media_lines.append(line)
-          media = "\n".join(media_lines).strip()
+          media = "\n".join(
+              collect_media_lines(issue_body, attachment_fields, excluded_urls)
+          ).strip()
 
           config_body, config_truncated = truncate_config(format_config_json(config_text))
           log_body, log_truncated = truncate_log(log_text)
@@ -746,7 +768,7 @@ jobs:
               raw_log = f.read()
 
           def extract_field(label: str, text: str) -> str:
-              pattern = rf"###\s+{re.escape(label)}\n\n(.*?)(?=\n###|\Z)"
+              pattern = rf"#{{2,3}}\s+{re.escape(label)}\s*\n+(.*?)(?=\n\s*#{{2,3}}\s+|\n---\s*(?:\n|\Z)|\Z)"
               match = re.search(pattern, text, re.DOTALL)
               return match.group(1).strip() if match else ""
 
