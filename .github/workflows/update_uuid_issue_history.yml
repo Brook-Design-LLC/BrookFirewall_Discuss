@@ -4,7 +4,7 @@ on:
   repository_dispatch:
     types: [uuid_issue_history]
   issues:
-    types: [edited]
+    types: [opened, edited]
 
 permissions:
   issues: write
@@ -15,6 +15,12 @@ jobs:
     if: |
       github.event_name == 'repository_dispatch' ||
       (
+        contains(github.event.issue.title, '[ARFlash]') &&
+        contains(github.event.issue.body, 'Client UUID') &&
+        !contains(github.event.issue.body, '## User Issue History')
+      ) ||
+      (
+        !contains(github.event.issue.title, '[ARFlash]') &&
         contains(github.event.issue.body, '## Info') &&
         contains(github.event.issue.body, 'Client UUID') &&
         !contains(github.event.issue.body, '## User Issue History')
@@ -336,6 +342,14 @@ jobs:
           )
           if desc_match:
               description = desc_match.group(1).strip()
+          if not description:
+              desc_match = re.search(
+                  r"## 問題描述\s*\n\n(.*?)(?=\n##|\n<details>|\n---|\Z)",
+                  issue_body,
+                  re.DOTALL,
+              )
+              if desc_match:
+                  description = desc_match.group(1).strip()
 
           members: list[str] = []
           if team_token:

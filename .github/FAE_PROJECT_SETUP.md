@@ -31,12 +31,18 @@ In the repo → **Settings** → **Secrets and variables** → **Actions** → *
 
 ## 4. How automation works
 
+### BrookFirewall (log-based)
+
 1. [`analyze_log_issue.yml`](workflows/analyze_log_issue.yml) formats the issue from `.bkglog` / diagnostic `.zip` (includes Client UUID in the Info table), then dispatches `uuid_issue_history` via `GH_PAT` (GitHub does not forward `issues: edited` events from `GITHUB_TOKEN` actions).
 2. [`update_uuid_issue_history.yml`](workflows/update_uuid_issue_history.yml) runs after that dispatch:
    - Searches for related issues by Client UUID (retries if search indexing is slow)
    - Appends **User Issue History** to the issue body
    - Adds the issue to the FAE project and fills the **Client UUID** field (via `GH_PAT` with `project` scope)
    - Posts an issue comment with the issue title, `## Description` text, and @mentions for each `fae` team member (one notification per issue)
+
+### ARFlash (title tag)
+
+Issues whose title contains **`[ARFlash]`** skip log analysis entirely. On **issue opened** (and **edited** if UUID/history was not ready yet), [`update_uuid_issue_history.yml`](workflows/update_uuid_issue_history.yml) reads **Client UUID** from the issue body (e.g. the 裝置資訊 table), appends **User Issue History** without rewriting the rest of the body, then runs the same FAE project and notification steps. FAE comments use `## 問題描述` when `## Description` is absent.
 
 If `FAE_PROJECT_URL` or `GH_PAT` is missing, history is still written; only the project step is skipped.
 

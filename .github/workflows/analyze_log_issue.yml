@@ -10,6 +10,7 @@ permissions:
 jobs:
   analyze-and-format:
     if: |
+      !contains(github.event.issue.title, '[ARFlash]') &&
       !contains(github.event.issue.body, '## Info') &&
       (contains(github.event.issue.body, '.bkglog') ||
        contains(github.event.issue.body, '.zip') ||
